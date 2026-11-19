@@ -119,7 +119,7 @@ st.html("""
     #slash-menu .slash-cmd {
         font-family: 'JetBrains Mono', monospace;
         font-size: 0.85rem;
-        color: #C15F3C;
+        color: #8B5E3C;
         white-space: nowrap;
     }
     #slash-menu .slash-desc { font-size: 0.85rem; color: #5E5D59; }
@@ -234,7 +234,7 @@ st.html("""
         font-weight: 400;
         font-size: 0.95em;
         vertical-align: -0.12em;
-        color: #C15F3C;
+        color: #8B5E3C;
         margin-right: 0.4rem;
     }
 </style>
@@ -853,7 +853,7 @@ def render_case_details():
     st.bar_chart(
         probs_df.set_index("Disaster class"),
         horizontal=True,
-        color="#C15F3C",
+        color="#8B5E3C",
         height=240,
     )
 
