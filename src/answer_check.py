@@ -18,6 +18,13 @@ CLASS_WORDS = {
     "Wildfire": ["ไฟป่า"],
 }
 PERCENT = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+# The level of a confidence interval ("95% CI") is a convention, not a figure the model produced.
+# "73.4% confidence" alone is the model's own confidence and is still checked.
+CONFIDENCE_LEVEL = re.compile(
+    r"\d+(?:[.,]\d+)?\s*%\s*(?:CI\b|C\.I\.|confidence\s+(?:interval|level|band))"
+    r"|ช่วงความเชื่อมั่น(?:ที่)?\s*\d+(?:[.,]\d+)?\s*%",
+    re.IGNORECASE,
+)
 NUMBER = re.compile(r"\d+(?:\.\d+)?")
 TOLERANCE = 0.6  # percentage points: covers rounding 88.8 -> 89
 
@@ -73,7 +80,7 @@ def check_answer(text: str, audits: Iterable[Dict[str, Any]], sources: Iterable[
         numbers_in(a["case"].get("summary"), allowed)
         numbers_in(a["case"].get("event"), allowed)
     numbers_in(sources, allowed)
-    quoted = {float(p.replace(",", ".")) for p in PERCENT.findall(text)}
+    quoted = {float(p.replace(",", ".")) for p in PERCENT.findall(CONFIDENCE_LEVEL.sub(" ", text))}
     unknown = sorted(p for p in quoted if not any(abs(p - n) <= TOLERANCE for n in allowed))
     if unknown:
         issues.append("quotes " + ", ".join(f"{p:g}%" for p in unknown) + " not found in the model output")

@@ -32,6 +32,20 @@ def test_invented_percentage_is_flagged(audit):
     assert not result["ok"] and "73.4%" in result["issues"][0]
 
 
+@pytest.mark.parametrize("text", [
+    "Storm. Accuracy is 91.7% (95% CI: [0.90, 0.93]).",
+    "Storm. Accuracy is 91.7%, 95% confidence interval 90-93.",
+    "พายุ ความแม่นยำ 91.7% (ช่วงความเชื่อมั่น 95%)",
+])
+def test_confidence_interval_level_is_not_a_quoted_figure(audit, registry, text):
+    assert check_answer(text, [audit], [registry.leaderboard])["ok"]
+
+
+def test_invented_figure_next_to_ci_is_still_flagged(audit, registry):
+    result = check_answer("Storm. Accuracy is 97.2% (95% CI).", [audit], [registry.leaderboard])
+    assert not result["ok"] and result["issues"] == ["quotes 97.2% not found in the model output"]
+
+
 def test_quoted_benchmark_figures_are_allowed(audit, registry):
     text = "Storm. Overall the Random Forest scores 91.7% accuracy."
     assert check_answer(text, [audit], [registry.leaderboard])["ok"]
