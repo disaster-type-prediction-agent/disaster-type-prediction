@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -10,7 +12,7 @@ from sklearn.metrics import f1_score
 # Keys in a local .env file become environment variables (already-set variables win).
 load_dotenv()
 
-from src.agent import RESTART, DisasterAuditorLLM
+from src.agent import RESTART, DisasterAuditorLLM, set_usage_hook
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
 from src.llm_tasks import llm_guess, route_question, write_scenario
@@ -487,12 +489,84 @@ DEFAULTS = {
     "llm_baseline": False,
     # A Typed test in flight: a test-bank case Gemini rewrote as a typed message (true type kept from Gemini).
     "typed_test": None,
+    "gemini_calls": 0,  # Gemini requests this session (counted for the shared key's quota guard)
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 if st.session_state.session_cases is None:
     st.session_state.session_cases = SessionCases()
+
+
+# -------------------------------------------------------------
+# Quota guard for the shared Gemini key
+# -------------------------------------------------------------
+# The public app runs on the owner's free-tier key. Without a cap, one visitor (or one demo) could use up
+# the day's quota for everyone. Visitors who paste their own key in Settings are not limited.
+def _limit(name, default):
+    try:
+        return int(config_value(name) or default)
+    except ValueError:
+        return default
+
+
+SESSION_LIMIT = _limit("GEMINI_SESSION_LIMIT", 40)  # Gemini requests per visitor session
+DAILY_LIMIT = _limit("GEMINI_DAILY_LIMIT", 400)     # Gemini requests per day across all visitors
+QUOTA_COOLDOWN_S = 60                               # pause after Gemini says the quota is exhausted (429)
+
+
+@st.cache_resource
+def shared_gemini_usage():
+    """One counter for the whole server process, shared by every session."""
+    return {"lock": threading.Lock(), "day": None, "calls": 0, "cooldown_until": 0.0}
+
+
+def using_shared_key():
+    shared = config_value("GEMINI_API_KEY")
+    return bool(shared) and st.session_state.gemini_api_key.strip() == shared
+
+
+def _today_usage():
+    usage = shared_gemini_usage()
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if usage["day"] != today:
+        usage["day"], usage["calls"] = today, 0
+    return usage
+
+
+def record_gemini(kind):
+    """Usage hook: src/agent reports every Gemini request ("call") and every 429 ("quota")."""
+    if not using_shared_key():
+        if kind == "call":
+            st.session_state.gemini_calls += 1
+        return
+    usage = shared_gemini_usage()
+    with usage["lock"]:
+        if kind == "call":
+            st.session_state.gemini_calls += 1
+            _today_usage()["calls"] += 1
+        elif kind == "quota":
+            usage["cooldown_until"] = time.time() + QUOTA_COOLDOWN_S
+
+
+set_usage_hook(record_gemini)  # thread-local: re-set on every run of this script
+
+
+def gemini_block_reason():
+    """Why Gemini can't be used right now on the shared key, or None if it can."""
+    if not st.session_state.gemini_api_key.strip() or not using_shared_key():
+        return None
+    usage = shared_gemini_usage()
+    with usage["lock"]:
+        wait = usage["cooldown_until"] - time.time()
+        calls_today = _today_usage()["calls"]
+    if wait > 0:
+        return f"Gemini's free quota is busy right now (try again in about {wait:.0f}s)"
+    if st.session_state.gemini_calls >= SESSION_LIMIT:
+        return f"This session has used its {SESSION_LIMIT} Gemini requests"
+    if calls_today >= DAILY_LIMIT:
+        return "The app has used today's shared Gemini budget"
+    return None
 if "stats" not in st.session_state or "records" not in st.session_state.stats:
     st.session_state.stats = new_stats()
 if st.session_state.layout_mode not in VIEWS:
@@ -534,7 +608,7 @@ def tag_typed_test(audit):
 
 def attach_llm_guess(audit):
     """Gemini predicts the type from the same 6 attributes the models see, so the two can be scored side by side."""
-    if "llm" in audit or not st.session_state.llm_baseline:
+    if "llm" in audit or not st.session_state.llm_baseline or gemini_block_reason():
         return
     key = st.session_state.gemini_api_key.strip()
     if not key:
@@ -685,6 +759,10 @@ def handle_slash_command(command_text: str):
 
 def start_typed_test(disaster_type=None):
     """Rewrite a random test case as a typed message (without its type) and send it like a user question."""
+    blocked = gemini_block_reason()
+    if blocked:
+        st.toast(blocked + ". Add your own Gemini key in Settings to continue.", icon=":material/hourglass_empty:")
+        return
     case = registry.get_random_case(disaster_type=disaster_type)
     if not case:
         st.toast("No test case matches that category.", icon=":material/warning:")
@@ -726,7 +804,10 @@ def answer_pending_question():
     test = st.session_state.typed_test
     if test and test["message"] != question:
         st.session_state.typed_test = None  # an earlier typed test that never reached the model
-    if claude_agent_enabled() or gemini_agent_enabled():
+    blocked = gemini_block_reason() if st.session_state.api_provider == "Google Gemini" else None
+    if blocked:
+        answer_with_plain_llm(question, offline_reason=blocked)
+    elif claude_agent_enabled() or gemini_agent_enabled():
         answer_with_agent(question)
     else:
         answer_with_plain_llm(question)
@@ -804,7 +885,12 @@ def answer_with_agent(question):
                 error = payload
 
         if error:
-            text += ("\n\n" if text else "") + f":orange[:material/warning:] {error}"
+            if not text.strip():
+                # Nothing came back (quota, outage): still give the built-in summary of the case on screen.
+                fallback = "".join(DisasterAuditorLLM(provider="gemini").local_answer(question, st.session_state.last_audit))
+                text = f":orange[:material/warning:] {error}\n\nHere is the built-in summary instead:\n\n{fallback}"
+            else:
+                text += "\n\n" + f":orange[:material/warning:] {error}"
             answer_ph.markdown(text)
         steps_box.update(label=steps_label(steps), state="error" if error and not steps else "complete")
 
@@ -876,8 +962,10 @@ def answer_sources(audit, provider_code):
     return "Based on " + ", ".join(parts[:-1]) + " and " + parts[-1] + "."
 
 
-def answer_with_plain_llm(question):
-    """Gemini or the local fallback: work out what the question wants, run it, then stream a reply."""
+def answer_with_plain_llm(question, offline_reason=None):
+    """Gemini or the local fallback: work out what the question wants, run it, then stream a reply.
+
+    offline_reason: Gemini is over its limit; route by keywords and answer with the built-in summary."""
     prov_code = "gemini" if st.session_state.api_provider == "Google Gemini" else "anthropic"
     # Earlier turns only: the question itself is the last message and goes in separately.
     history = [
@@ -887,7 +975,7 @@ def answer_with_plain_llm(question):
     ]
 
     route = None
-    gemini_key = st.session_state.gemini_api_key.strip()
+    gemini_key = "" if offline_reason else st.session_state.gemini_api_key.strip()
     if gemini_key:
         with st.spinner("Reading your question…"):
             route = route_question(gemini_key, question, registry.class_names, COUNTRIES)
@@ -904,11 +992,12 @@ def answer_with_plain_llm(question):
     llm = DisasterAuditorLLM(provider=prov_code, api_key=api_key)
     with st.chat_message("assistant", avatar=APP_ICON):
         reply, answer_ph = "", st.empty()
-        for piece in llm.chat_stream(
-            user_message=question,
-            history=history,
-            current_case=st.session_state.last_audit,
-        ):
+        if offline_reason:
+            reply = (f":orange[:material/hourglass_empty:] {offline_reason}, so this answer uses the built-in summary "
+                     "(the ML models still ran). Add your own free Gemini key in Settings to keep chatting.\n\n")
+        stream = (llm.local_answer(question, st.session_state.last_audit) if offline_reason
+                  else llm.chat_stream(user_message=question, history=history, current_case=st.session_state.last_audit))
+        for piece in stream:
             # RESTART: the model failed mid-answer and a fallback model is starting over.
             reply = "" if piece is RESTART else reply + piece
             answer_ph.markdown(reply)
@@ -916,7 +1005,8 @@ def answer_with_plain_llm(question):
              if prov_code == "gemini" and gemini_key and result else None)
     st.session_state.messages.append({
         "role": "assistant", "content": reply,
-        "sources": answer_sources(st.session_state.last_audit, prov_code),
+        "sources": ("Answered by the app's built-in summary (Gemini limit reached)." if offline_reason
+                    else answer_sources(st.session_state.last_audit, prov_code)),
         "check": check,
     })
     st.rerun()
@@ -1405,8 +1495,9 @@ with st.sidebar:
         target_cat = None if cat_select == "All categories" else cat_select
         if st.button("Run", icon=":material/play_arrow:", help="The model gets a test case's recorded features"):
             run_audit(registry.get_random_case(disaster_type=target_cat), f"Audit a **{cat_select}** case")
+    blocked = gemini_block_reason()
     if st.button("Typed test", icon=":material/keyboard:", width="stretch",
-                 disabled=not st.session_state.gemini_api_key.strip(),
+                 disabled=not st.session_state.gemini_api_key.strip() or bool(blocked),
                  help="Gemini rewrites a random test case of this category as a typed message (without its type); "
                       "it then goes through the chat like anything you type, and is scored against the real answer."):
         start_typed_test(target_cat)
@@ -1495,8 +1586,14 @@ with st.sidebar:
             help="Correct predictions below this confidence also count as hard cases",
         )
 
-    status = ":green[●] connected" if llm_connected else ":orange[●] offline, add an API key"
+    blocked = gemini_block_reason() if is_gemini else None
+    status = (":orange[●] paused, built-in answers" if blocked else ":green[●] connected" if llm_connected
+              else ":orange[●] offline, add an API key")
     st.caption(f"{llm_label}: {status}")
+    if is_gemini and using_shared_key():
+        st.caption(f"Gemini requests this session: {st.session_state.gemini_calls}/{SESSION_LIMIT} on the shared key"
+                   + (f". {blocked}; add your own free key in Settings to continue." if blocked else ""),
+                   help="The public app shares one free-tier key, so each session gets a budget. Your own key isn't limited.")
     st.caption(":green[●] Random Forest · LightGBM · XGBoost ready")
     st.caption(
         f"Test bank: {registry.metadata['total_test_cases']:,} records · "

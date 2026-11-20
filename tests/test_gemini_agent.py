@@ -22,7 +22,7 @@ class FakeClient:
         self.script, self.requests = list(script), []
         self.models = self
 
-    def generate_content_stream(self, model, contents, config):
+    def generate_content_stream(self, model, contents, config=None):
         self.requests.append((model, list(contents)))
         step = self.script.pop(0)
         if isinstance(step, Exception):

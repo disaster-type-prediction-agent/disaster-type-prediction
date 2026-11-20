@@ -1,7 +1,8 @@
 import os
 import json
+import threading
 import time
-from typing import Dict, Any, List, Optional, Generator
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 SYSTEM_PROMPT = """You are the "Disaster Auditor Agent", an expert AI specializing in natural disaster classification, machine learning evaluation, and Explainable AI (SHAP).
 
@@ -52,7 +53,64 @@ def gemini_models() -> List[str]:
     return configured + [m for m in DEFAULT_GEMINI_MODELS if m not in configured]
 
 
+# Usage hook: the app sets one per script run (thread-local, so sessions don't mix) to count calls
+# against its quota guard. Called with "call" for every request and "quota" when Gemini answers 429.
+_usage = threading.local()
+
+
+def set_usage_hook(hook: Optional[Callable[[str], None]]) -> None:
+    _usage.hook = hook
+
+
+def _report(kind: str) -> None:
+    hook = getattr(_usage, "hook", None)
+    if hook:
+        hook(kind)
+
+
+def _is_quota_error(e: Exception) -> bool:
+    return getattr(e, "code", None) == 429
+
+
+class _CountedModels:
+    """client.models with every request reported to the usage hook (the app's quota guard)."""
+
+    def __init__(self, models):
+        self._models = models
+
+    def generate_content(self, **kwargs):
+        _report("call")
+        try:
+            return self._models.generate_content(**kwargs)
+        except Exception as e:
+            if _is_quota_error(e):
+                _report("quota")
+            raise
+
+    def generate_content_stream(self, **kwargs):
+        _report("call")
+        try:
+            yield from self._models.generate_content_stream(**kwargs)
+        except Exception as e:
+            if _is_quota_error(e):
+                _report("quota")
+            raise
+
+
+class _CountedClient:
+    def __init__(self, client):
+        # Keep the real client alive: genai.Client closes its HTTP connection when garbage-collected,
+        # and holding only client.models would let that happen mid-request.
+        self._client = client
+        self.models = _CountedModels(client.models)
+
+
 def make_gemini_client(api_key: str):
+    """Every Gemini request in the app goes through this client, so every one is counted."""
+    return _CountedClient(_make_raw_client(api_key))
+
+
+def _make_raw_client(api_key: str):
     from google import genai
     from google.genai import types
 
@@ -171,6 +229,10 @@ class DisasterAuditorLLM:
 
         yield f"\n⚠️ Gemini API Error: {last_err}. Please verify your Gemini API key in the sidebar."
 
+    def local_answer(self, user_message: str, current_case: Optional[Dict]) -> Generator[str, None, None]:
+        """The built-in summary, without any LLM call (used when Gemini is off, busy or over its limit)."""
+        yield from self._stream_local_fallback(user_message, current_case)
+
     def _stream_local_fallback(self, user_message: str, current_case: Optional[Dict]) -> Generator[str, None, None]:
         msg = user_message.lower()
         if "thai" in msg or any("\u0e00" <= c <= "\u0e7f" for c in user_message):
@@ -178,9 +240,9 @@ class DisasterAuditorLLM:
             resp = "สวัสดีครับ! ผมคือ **Disaster Auditor AI**\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"สำหรับเคสปัจจุบัน **`{c['case_id']}`** (เหตุการณ์จริง: **{c['ground_truth_class']}** ที่ประเทศ {c['summary']['country']}):\n"
+                resp += f"สำหรับเคสปัจจุบัน **`{c['case_id']}`** (เหตุการณ์จริง: **{c['ground_truth_class'] or 'ยังไม่ระบุ'}** ที่ประเทศ {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
-                    c_status = "ถูกต้อง ✓" if m_data["is_correct"] else "ทำนายผิด ✗"
+                    c_status = "ยังไม่ยืนยันเฉลย" if m_data["is_correct"] is None else "ถูกต้อง ✓" if m_data["is_correct"] else "ทำนายผิด ✗"
                     resp += f"• **{m_name}**: ทำนายเป็น `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
                 resp += "\n💡 *คำแนะนำ: คุณสามารถใส่ **Gemini API Key** ในแท็บ Settings ที่แถบเมนูด้านซ้าย เพื่อเปิดการสนทนาและวิเคราะห์เชิงลึกด้วย LLM ได้แบบเรียลไทม์ครับ*"
             else:
@@ -193,9 +255,9 @@ class DisasterAuditorLLM:
             resp = "Hello! I am the **Disaster Auditor AI**.\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"Regarding the active case **`{c['case_id']}`** (Ground Truth: **{c['ground_truth_class']}**, {c['summary']['country']}):\n"
+                resp += f"Regarding the active case **`{c['case_id']}`** (Ground Truth: **{c['ground_truth_class'] or 'not confirmed'}**, {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
-                    c_status = "CORRECT ✓" if m_data["is_correct"] else "MISCLASSIFIED ✗"
+                    c_status = "UNVERIFIED" if m_data["is_correct"] is None else "CORRECT ✓" if m_data["is_correct"] else "MISCLASSIFIED ✗"
                     resp += f"• **{m_name}**: Predicted `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
                 resp += "\n💡 *Tip: Provide your **Gemini API Key** in the sidebar settings to unlock live generative dialogue and deep XAI explanations.*"
             else:
