@@ -12,7 +12,7 @@ from sklearn.metrics import f1_score
 # Keys in a local .env file become environment variables (already-set variables win).
 load_dotenv()
 
-from src.agent import RESTART, DisasterAuditorLLM, set_usage_hook
+from src.agent import RESTART, DisasterAuditorLLM, language_note, set_usage_hook
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
 from src.llm_tasks import llm_guess, route_question, write_scenario
@@ -857,7 +857,8 @@ def answer_with_agent(question):
         answer_ph = st.empty()
 
         for kind, payload in agent.run_turn(
-            history, f"{ui_context()}\n\n{question}", active_models(), st.session_state.session_cases
+            history, f"{ui_context()}\n\n{question}\n\n{language_note(question)}", active_models(),
+            st.session_state.session_cases
         ):
             if kind == "text":
                 text += payload

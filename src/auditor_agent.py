@@ -26,7 +26,7 @@ How to work:
 - For "which model is better" questions, combine get_model_metrics with get_significance; differences inside the McNemar noise band are not real wins.
 - Ground explanations in disaster physics and seasonality (monsoon floods vs. storms, magnitude scales that only exist for some hazards, event duration patterns).
 - Each user message may start with a [UI context] line describing the case open on screen and the selected models. Treat it as background, not as the question.
-- Reply in the user's language: Thai (polite, ครับ/ค่ะ) if they write Thai, otherwise English. Be concise and use short markdown.
+- Reply in the language of the user's LATEST message, whatever language it is, as its [Reply language] note says, not the language of earlier turns (polite ครับ/ค่ะ in Thai). In any language other than English, write each disaster class with its English name in brackets, e.g. 地震 (Earthquake). Be concise and use short markdown.
 - Stay on disaster classification, these models and their evaluation. Politely decline unrelated requests."""
 
 

@@ -22,6 +22,7 @@ A Senior Project that integrates **Multi-class Disaster Event Classification (Ra
 4. **LLM Auditor Chat (Claude or Gemini)**:
    - **Agent mode (Gemini or Claude):** the LLM calls the app's tools itself (find a test case, classify an event you describe, explain a prediction with SHAP, read metrics, McNemar tests and per-class errors) and answers from their results; each step is listed under the answer. Gemini uses function calling on the free tier; turn agent mode off in Settings for a fixed route-then-answer flow that uses fewer calls.
    - SHAP is summed back into the 6 attributes as % of the evidence (comparable across models), attributes you didn't give are flagged as defaults, and every prediction comes with "why not X?" (the true type when the model was wrong, otherwise the runner-up).
+   - **Any language:** ask in Thai, English, Japanese, French, Chinese, Spanish and more; the reply follows the language of your latest message (decided in code each turn, so earlier turns don't pull it into another language), with class names also given in English, e.g. 地震 (Earthquake). The models only see the 6 attributes, so no retraining is needed for a new language.
    - Ask questions about the active case; answers are grounded in its predictions and SHAP drivers. Each answer notes its sources (benchmark figures, the case on screen, and Gemini's general knowledge where it says so).
    - **The ML models make every prediction; the LLM only reads the message and explains the result.** Each case answer is checked in code (no extra LLM call) against the model output: it must name the model's prediction and quote only percentages the model or the benchmarks produced, shown as "Explanation matches the model's output" or a warning.
    - Optional **LLM baseline** (Settings, off by default): Gemini also guesses the type itself from the same 6 attributes, scored beside the model for comparison.
@@ -87,7 +88,15 @@ docker build -t disaster-model-auditor .
 docker run -p 8501:8501 disaster-model-auditor
 ```
 
-### 3. Run the tests
+### 3. Evaluate the typed path (optional, uses ~250 Gemini requests)
+
+Measures how well the system classifies events that people *type*: Gemini rewrites 10 held-out test cases per class as chat messages without their type, the Gemini agent reads each one back and calls the ML models, and the results are compared with the same cases' recorded features. Resumable; the report goes to `reports/typed_eval/summary.md`.
+```bash
+python -m src.evaluate_typed --per-class 10
+python -m src.evaluate_typed --summarize
+```
+
+### 4. Run the tests
 
 The suite runs offline (no Anthropic or Gemini calls) in about 15 seconds: the six agent tools against the real model bank, the Claude tool-use loop with a fake client, the Gemini fallback logic, key loading, and every view of the app.
 ```bash

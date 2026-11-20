@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -31,7 +32,7 @@ WHERE YOUR ANSWERS COME FROM:
 GUIDELINES:
 - Answer user questions informatively, clearly, and authoritatively.
 - Be concise: lead with the answer, then at most 3-5 short bullets or ~150 words, unless the user asks for more detail.
-- Support both Thai and English naturally: if the user asks in Thai, reply in fluent, polite Thai (ครับ/ค่ะ); if in English, reply in English.
+- Reply in the language of the LATEST user question, whatever language it is (follow its [Reply language] note), not the language of earlier turns; polite Thai (ครับ/ค่ะ) for Thai. In any language other than English, write each disaster class with its English name in brackets, e.g. 地震 (Earthquake).
 - If an active audit case is provided in the context, refer to its specific metrics, ground truth, predicted class, confidence, and SHAP features.
 - READING SHAP: use the "SHAP by attribute" % shares in the context. Compare models by these shares only (raw SHAP units differ: probability for Random Forest, log-odds for LightGBM/XGBoost). An attribute marked as a filled-in default was not given by the user: never present it as a reason for the prediction; instead say the prediction may change once the user supplies it, and invite them to.
 - WHY NOT ANOTHER CLASS: when a model is WRONG, use its "Why not <true type>?" lines: name what held the true type back and what evidence both classes share. Use the runner-up lines when asked why the model didn't pick something else.
@@ -51,6 +52,52 @@ RESTART = object()
 def gemini_models() -> List[str]:
     configured = [m.strip() for m in os.getenv("GEMINI_MODEL", "").split(",") if m.strip()]
     return configured + [m for m in DEFAULT_GEMINI_MODELS if m not in configured]
+
+
+THAI_CHARS = re.compile(r"[\u0e00-\u0e7f]")
+LATIN_LETTERS = re.compile(r"[A-Za-z]")
+WORDS = re.compile(r"[A-Za-z']+")
+# Common English words: Latin-script text with several of these is English; other Latin text
+# (French, Indonesian, Spanish, ...) is left to the LLM to recognise.
+ENGLISH_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "what", "why", "how", "which", "who", "when", "where",
+    "does", "do", "did", "can", "could", "would", "should", "will", "in", "on", "of", "for", "to", "and", "or",
+    "not", "with", "from", "this", "that", "it", "its", "model", "models", "about", "me", "my", "you", "your",
+    "give", "show", "tell", "explain", "case", "than", "better", "best", "there", "say", "lasted", "days",
+}
+
+
+def reply_language(text: str) -> str:
+    """The language of THIS message: "Thai", "English", or "other" (any other language), decided in code.
+
+    Left to the LLM, earlier turns pull the reply into their language (an English question after Thai
+    turns came back in Thai). Mixed messages like "ทำไมไม่ใช่ Flood" count as Thai; a Thai place name
+    inside an English sentence does not."""
+    thai, latin = len(THAI_CHARS.findall(text)), len(LATIN_LETTERS.findall(text))
+    if thai and thai * 2 >= latin:
+        return "Thai"
+    letters = sum(ch.isalpha() for ch in text)
+    words = [w.lower() for w in WORDS.findall(text)]
+    if letters and latin >= 0.8 * letters and words:
+        english = sum(w in ENGLISH_WORDS for w in words)
+        if english >= 2 or english / len(words) >= 0.3 or len(words) <= 3:
+            return "English"
+    return "other" if letters else "English"
+
+
+CLASS_NAME_RULE = ("Name each disaster class in the reply's language followed by its English name in brackets, "
+                   "e.g. 地震 (Earthquake), Inondation (Flood).")
+
+
+def language_note(text: str) -> str:
+    """A per-turn instruction appended to the question, so the reply follows the latest message."""
+    lang = reply_language(text)
+    if lang == "Thai":
+        return "[Reply language: Thai. Answer in polite Thai (ครับ/ค่ะ), whatever language earlier turns used.]"
+    if lang == "English":
+        return "[Reply language: English. Answer in English, even if earlier turns were in another language.]"
+    return ("[Reply language: the language of the latest user message above (not English unless it is English, "
+            "and not the language of earlier turns). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
 
 
 # Usage hook: the app sets one per script run (thread-local, so sessions don't mix) to count calls
@@ -192,7 +239,7 @@ class DisasterAuditorLLM:
         recent = [h for h in history if h.get("content")][-HISTORY_TURNS:]
         convo = "".join(f"{h['role'].upper()}: {h['content'][:1500]}\n" for h in recent)
         convo_str = f"\n\nCONVERSATION SO FAR:\n{convo}" if convo else ""
-        return f"{SYSTEM_PROMPT}\n{context_str}{convo_str}\n\nUser Question:\n{user_message}"
+        return f"{SYSTEM_PROMPT}\n{context_str}{convo_str}\n\nUser Question:\n{user_message}\n\n{language_note(user_message)}"
 
     def _stream_gemini(self, prompt: str) -> Generator[str, None, None]:
         """Stream from a pinned, fast model; fall back down a short list only if a model fails before answering.
