@@ -31,14 +31,37 @@ A Senior Project that integrates **Multi-class Disaster Event Classification (Ra
 
 ---
 
+## 🔄 How It Works
+
+The LLM is the interface and the ML models are the engine: Gemini reads the message and explains the result, but never makes the prediction itself.
+
+```mermaid
+flowchart TD
+    U["User types an event<br/>(any language)"] --> R["Gemini reads it<br/>→ 6 attributes"]
+    R -->|"classify_event tool"| F["event_features.py<br/>6 attributes → 245 features<br/>(missing ones get training defaults, flagged)"]
+    F --> M["Random Forest · LightGBM · XGBoost<br/>predict the disaster type"]
+    M --> S["SHAP TreeExplainer<br/>summed into the 6 attributes (% share)<br/>+ why not the runner-up / true type"]
+    S --> E["Gemini explains the result<br/>in the user's language"]
+    E --> C["Answer check in code<br/>names the model's prediction? quotes only real numbers?"]
+    C --> A["Answer + sources + check result"]
+    M --> SB["Session scoreboard<br/>(scored once the true type is known)"]
+```
+
+- **SHAP runs on every prediction**, right after the models. Gemini only sees the SHAP shares the code computed; it doesn't invent the reasons.
+- **Test-bank cases** skip the first two steps: their 245 features are already recorded.
+- **Typed tests** run the whole chain on a test case Gemini rewrote as a message, so the scoreboard and `reports/typed_eval/` measure the full typed path against a known answer.
+- Without an API key, or once the shared key's quota is used up, the models and SHAP still run and a built-in summary replaces Gemini's answer.
+
+---
+
 ## 📂 Project Structure
 
 ```text
-disaster-type-prediction-1/
-├── app.py                      # Streamlit Interactive Web Application
+disaster-type-prediction/
+├── app.py                      # Streamlit app: chat, case cards, scoreboard, benchmarks, quota guard
 ├── Dockerfile                  # Container definition for reproducible deployment
-├── requirements.txt            # Python dependencies
-├── .streamlit/config.toml      # Streamlit theme & server settings
+├── requirements.txt            # Python dependencies (requirements-dev.txt adds pytest)
+├── .streamlit/config.toml      # Streamlit theme & server settings (secrets.toml is git-ignored)
 ├── models/                     # Production artifacts
 │   ├── rf_pipeline.joblib      # Trained best Random Forest Pipeline
 │   ├── lgb_pipeline.joblib     # LightGBM Pipeline
@@ -49,14 +72,21 @@ disaster-type-prediction-1/
 │   └── ground_truth_bank.json  # (legacy, single-model) test events with ground truth
 ├── src/                        # Modular production code
 │   ├── models/                 # Multi-model layer used by the app
-│   │   ├── registry.py         # Loads the case bank, runs multi-model audits
-│   │   ├── base.py             # Common model interface
+│   │   ├── registry.py         # Loads the case bank, runs audits, "why not X?" contrasts
+│   │   ├── base.py             # Common model interface; packages SHAP per attribute
 │   │   ├── rf_model.py / lgb_model.py / xgb_model.py  # Predict + SHAP per model
 │   │   └── utils.py            # Class names & natural-language SHAP explanations
-│   ├── agent.py                # LLM chat (Claude / Gemini) + local fallback
+│   ├── event_features.py       # 6 attributes ↔ 245 features, SHAP by attribute, filled-in defaults
+│   ├── auditor_agent.py        # Agent tools (classify_event, explain_prediction, metrics…) + Gemini/Claude loops
+│   ├── agent.py                # Chat prompts, Gemini client with request counting, reply language, local fallback
+│   ├── llm_tasks.py            # Single-shot Gemini tasks: route a message, extract an event, write a typed test
+│   ├── answer_check.py         # Checks each answer against the model output (no LLM call)
+│   ├── evaluate_typed.py       # Typed-path evaluation → reports/typed_eval/
 │   ├── export_all_models.py    # Trains LightGBM/XGBoost, builds multi-model bank & metadata
 │   ├── export_model.py         # (legacy) Random Forest pipeline export
 │   └── predictor.py / explainer.py / benchmark.py  # (legacy, single-model; not used by app.py)
+├── reports/typed_eval/         # Typed-path results (results.jsonl) and report (summary.md, summary.csv)
+├── tests/                      # Offline test suite (fake LLM clients, real model bank)
 ├── notebooks/                  # Academic research & experimental record
 │   ├── 01_data_understanding.ipynb
 │   ├── 02_data_EDA.ipynb
@@ -115,3 +145,12 @@ pytest
 6. Landslide
 7. Storm
 8. Wildfire
+
+---
+
+## ⚠️ Known Limitations & Future Work
+
+- **Typed messages cost about 5 points of accuracy** (`reports/typed_eval/summary.md`, 80 cases): Random Forest 91.2% → 86.2%, LightGBM 93.8% → 88.8%, XGBoost 90.0% → 82.5%. Gemini reads 96.7% of attributes correctly; most of the drop comes from messages that name a measure but give no figure ("temperatures were reported, no figures"), where the magnitude scale is read wrong.
+- **Missing attributes are filled with training defaults** (month → January, duration → 0 days). The models still predict, and the app flags these attributes, but a prediction built mostly from defaults says more about the defaults than the event. Asking a follow-up question when too little is given is planned.
+- **Drought, Flood and Wildfire share the Km2 magnitude scale**, so the models separate them mainly by duration, month and place. This comes from the EM-DAT data, not the code; extra pre-event attributes (rainfall, temperature anomaly) would help.
+- **Shared Gemini key on the free tier:** each session gets 40 requests and the app 400 per day, after which built-in summaries replace Gemini's answers. A personal key can be pasted in the sidebar.
