@@ -13,12 +13,17 @@ A Senior Project that integrates **Multi-class Disaster Event Classification (Ra
    - Challenges the pre-trained model with 3,495 real historical events from the EM-DAT test set.
    - Live side-by-side comparison: **Model Prediction vs. Ground Truth**, or all three models at once in Compare mode.
    - Model Disagreement Radar surfaces the test cases where the three models predict different classes.
-   - Real-time Session Scoreboard tracking accuracy and error patterns.
+   - Real-time Session Scoreboard: Accuracy and Macro-F1 of the ML model **and of Gemini side by side** on the same cases, from test-bank cases and from events users describe.
+   - **Describe your own event** in the chat (Thai or English), e.g. "a storm hit southern Thailand in November, 120 km/h winds, 3 days": Gemini extracts the 6 attributes, the models predict, and once you confirm what it really was, it's scored.
+   - **Model inputs:** 245 features built from 6 pre-event attributes (country, magnitude scale, region, start month, event duration, magnitude value); the Leaderboard tab lists them. `src/event_features.py` encodes a described event exactly like the training data.
 3. **Explainable AI (SHAP TreeExplainer)**:
    - Quantifies the impact of physical features (magnitude scale, event duration, timing, geographic region).
    - Explains *why* the model made each decision, both for correct cases and hard misclassified cases.
 4. **LLM Auditor Chat (Claude or Gemini)**:
-   - Ask questions about the active case; answers are grounded in its predictions and SHAP drivers.
+   - **Agent mode (Gemini or Claude):** the LLM calls the app's tools itself (find a test case, classify an event you describe, explain a prediction with SHAP, read metrics, McNemar tests and per-class errors) and answers from their results; each step is listed under the answer. Gemini uses function calling on the free tier; turn agent mode off in Settings for a fixed route-then-answer flow that uses fewer calls.
+   - SHAP is summed back into the 6 attributes as % of the evidence (comparable across models), attributes you didn't give are flagged as defaults, and every prediction comes with "why not X?" (the true type when the model was wrong, otherwise the runner-up).
+   - Ask questions about the active case; answers are grounded in its predictions and SHAP drivers. Each answer notes its sources (benchmark figures, the case on screen, and Gemini's general knowledge where it says so).
+   - **LLM accuracy check:** for every scored case, Gemini also guesses the disaster type from the same 6 attributes the models get, so its accuracy is measured, not assumed.
    - Choose Anthropic Claude or Google Gemini in the sidebar and paste an API key, or save it once in `.streamlit/secrets.toml` (git-ignored) as `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` so it loads on every start. Environment variables and a `.env` file work too; `LLM_PROVIDER = "gemini"` or `"claude"` picks the starting provider.
    - Falls back to a **Local Auditor Engine** summary when no API key is provided.
 
@@ -79,6 +84,14 @@ Build and launch the container with a single command:
 ```bash
 docker build -t disaster-model-auditor .
 docker run -p 8501:8501 disaster-model-auditor
+```
+
+### 3. Run the tests
+
+The suite runs offline (no Anthropic or Gemini calls) in about 15 seconds: the six agent tools against the real model bank, the Claude tool-use loop with a fake client, the Gemini fallback logic, key loading, and every view of the app.
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ---

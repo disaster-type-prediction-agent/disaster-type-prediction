@@ -1,7 +1,9 @@
-"""Claude-powered auditor agent: Claude decides which registry tools to call and answers from their results."""
+"""Tool-using auditor agents (Claude or Gemini): the LLM decides which registry tools to call and answers from their results."""
 import json
 from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
+
+from src.event_features import MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -14,13 +16,25 @@ You audit an 8-class disaster-type classifier (Drought, Earthquake, Epidemic, Ex
 How to work:
 - Use the tools for every fact about the models, metrics, cases or SHAP values. Never state a metric, count, confidence or SHAP value you did not get from a tool in this conversation.
 - When the user wants to see, test or find a case, call find_case (or get_case for a specific id). The app shows each case you load as a card, so summarize what matters instead of repeating every field.
+- When the user describes a specific event of their own (a place, month, duration, or size such as wind speed or area), call classify_event with only the details they actually gave; pass stated_true_type only if they say what it really was. Then tell them which attributes were missing (filled with training defaults) and that adding them may change the prediction.
+- To revisit a case already loaded or classified (another model, why not X, more detail), use get_case or explain_prediction with its id (EVENT-n or CASE-n). Call classify_event again only when the user changes or adds event details; otherwise you'd create a duplicate event.
+- Write for people: say "not given (default used)" and "% of the evidence", never raw field names like filled_in or share_pct.
 - If the question is about particular models, pass them in `models`; otherwise leave it out to use the models selected in the UI.
-- To explain a prediction, call explain_prediction. To explain why a model did NOT pick a class, call it with target_class set to that class.
+- To explain a prediction, call explain_prediction. To explain why a model did NOT pick a class, call it with target_class set to that class. Case results already include `why_not` (SHAP toward the true type when the model was wrong, else the runner-up).
+- SHAP is reported per raw attribute as `share_pct` (signed % of that model's total evidence). Compare models by share_pct, never by raw SHAP. An attribute with `filled_in: true` was not given by the user: never cite it as a reason.
+- Anything not from a tool (disaster science, history) is general knowledge: say so briefly.
 - For "which model is better" questions, combine get_model_metrics with get_significance; differences inside the McNemar noise band are not real wins.
 - Ground explanations in disaster physics and seasonality (monsoon floods vs. storms, magnitude scales that only exist for some hazards, event duration patterns).
 - Each user message may start with a [UI context] line describing the case open on screen and the selected models. Treat it as background, not as the question.
 - Reply in the user's language: Thai (polite, ครับ/ค่ะ) if they write Thai, otherwise English. Be concise and use short markdown.
 - Stay on disaster classification, these models and their evaluation. Politely decline unrelated requests."""
+
+
+def _slim_attr(row: Dict[str, Any]) -> Dict[str, Any]:
+    out = {"attribute": row["attribute"], "value": row["value"], "share_pct": row["share"]}
+    if row.get("filled"):
+        out["filled_in"] = True
+    return out
 
 
 def _enum_or_none(value, allowed):
@@ -42,6 +56,23 @@ def _close_dangling_tool_calls(history: List[Dict[str, Any]], reason: str) -> No
         ]})
 
 
+class SessionCases:
+    """Events the user described in this chat (EVENT-1, EVENT-2, ...), so tools can find them again.
+
+    Lives in the user's session, not in AuditorTools, which is shared by every session."""
+
+    def __init__(self):
+        self.cases: Dict[str, Dict[str, Any]] = {}
+        self.counter = 0
+
+    def next_id(self) -> str:
+        self.counter += 1
+        return f"EVENT-{self.counter}"
+
+    def add(self, case: Dict[str, Any]) -> None:
+        self.cases[case["case_id"]] = case
+
+
 class AuditorTools:
     """Tool definitions and executors backed by the ModelRegistry."""
 
@@ -50,6 +81,8 @@ class AuditorTools:
         self.classes = list(registry.class_names)
         self.models = list(registry.available_models)
         self.regions = sorted({c["summary"]["region"] for c in registry.cases if c["summary"]["region"] != "Unknown"})
+        self.countries = [f[len("country_"):] for f in registry.feature_names if f.startswith("country_")]
+        self.country_regions = registry.country_regions()
         self._error_breakdown = self._build_error_breakdown()
 
     # ---------------------------------------------------------------- schemas
@@ -81,7 +114,7 @@ class AuditorTools:
             },
             {
                 "name": "get_case",
-                "description": "Load a specific test case by id (e.g. CASE-0172), run the chosen models on it, and show it as a case card.",
+                "description": "Load a specific case by id (a test case like CASE-0172, or a user event like EVENT-1), run the chosen models on it, and show it as a case card.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -89,6 +122,30 @@ class AuditorTools:
                         "models": models_param,
                     },
                     "required": ["case_id"],
+                },
+            },
+            {
+                "name": "classify_event",
+                "description": (
+                    "Run the models on an event the user describes (not from the test bank) and show it as a case card. "
+                    "Pass ONLY values the user explicitly stated. Never estimate, assume or invent a value (no typical "
+                    "durations or sizes): omit it, and the app fills the training default and reports it as filled_in. "
+                    "Returns predictions, SHAP per attribute and why_not."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "country": {"type": "string", "description": "Country in English, e.g. Thailand."},
+                        "region": {"type": "string", "enum": REGIONS, "description": "Only if no country is given."},
+                        "start_month": {"type": "integer", "minimum": 1, "maximum": 12},
+                        "duration_days": {"type": "number", "minimum": 0, "description": "Only if the user said how long it lasted; convert hours/weeks to days."},
+                        "magnitude_value": {"type": "number", "minimum": 0,
+                                            "description": "Wind speed in kph, area in km2, Richter/moment magnitude, temperature °C, or people vaccinated."},
+                        "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "Unit of magnitude_value."},
+                        "stated_true_type": {"type": "string", "enum": self.classes,
+                                             "description": "Only if the user says what the event actually was."},
+                        "models": models_param,
+                    },
                 },
             },
             {
@@ -158,6 +215,15 @@ class AuditorTools:
                   and _enum_or_none(args.get("region"), self.regions)
                   and _enum_or_none(args.get("misclassified_by"), self.models)
                   and bool_ok("only_hard") and bool_ok("only_disagreement") and models_ok())
+        elif name == "classify_event":
+            month, numbers = args.get("start_month"), [args.get(k) for k in ("duration_days", "magnitude_value")]
+            ok = (_enum_or_none(args.get("region"), REGIONS)
+                  and _enum_or_none(args.get("magnitude_scale"), MAGNITUDE_SCALES)
+                  and _enum_or_none(args.get("stated_true_type"), self.classes)
+                  and (args.get("country") is None or isinstance(args["country"], str))
+                  and (month is None or (isinstance(month, int) and not isinstance(month, bool) and 1 <= month <= 12))
+                  and all(n is None or (isinstance(n, (int, float)) and not isinstance(n, bool) and n >= 0) for n in numbers)
+                  and models_ok())
         elif name == "get_case":
             ok = isinstance(args.get("case_id"), str) and models_ok()
         elif name == "explain_prediction":
@@ -176,8 +242,36 @@ class AuditorTools:
         return None if ok else "input does not match the tool schema"
 
     # -------------------------------------------------------------- execution
-    def execute(self, name: str, args: Dict[str, Any], default_models: List[str]) -> Tuple[Dict[str, Any], str, Optional[Dict], List[str]]:
-        """Run a tool. Returns (result for Claude, one-line UI summary, audit to show as a card or None, models audited)."""
+    def _lookup(self, case_id: str, session: Optional[SessionCases]) -> Optional[Dict[str, Any]]:
+        case_id = case_id.strip().upper()
+        return (session.cases.get(case_id) if session else None) or self.registry.get_case(case_id)
+
+    def execute(self, name: str, args: Dict[str, Any], default_models: List[str],
+                session: Optional[SessionCases] = None) -> Tuple[Dict[str, Any], str, Optional[Dict], List[str]]:
+        """Run a tool. Returns (result for the LLM, one-line UI summary, audit to show as a card or None, models audited)."""
+        if name == "classify_event":
+            from src.llm_tasks import match_country
+
+            models = list(args.get("models") or default_models)
+            country = match_country(args.get("country"), self.countries)
+            event = {
+                "country": country,
+                "region": args.get("region") or self.country_regions.get(country),
+                "start_month": args.get("start_month"),
+                "duration_days": args.get("duration_days"),
+                "magnitude_value": args.get("magnitude_value"),
+                "magnitude_scale": args.get("magnitude_scale"),
+            }
+            session = session or SessionCases()
+            case = make_event_case(event, self.registry.feature_names, session.next_id(),
+                                   truth=args.get("stated_true_type"), class_names=self.classes)
+            session.add(case)
+            audit = self.registry.audit_case(case, models)
+            result = self._case_payload(audit)
+            if args.get("country") and not country:
+                result["note"] = f"Country '{args['country']}' is not one the models know; it was left out."
+            return result, f"Classified {case['case_id']} ({country or 'no country'})", audit, models
+
         if name == "find_case":
             models = list(args.get("models") or default_models)
             # A case picked because a model got it wrong must show that model's prediction.
@@ -203,29 +297,32 @@ class AuditorTools:
 
         if name == "get_case":
             models = args.get("models") or default_models
-            case = self.registry.get_case(args["case_id"].strip().upper())
+            case = self._lookup(args["case_id"], session)
             if not case:
                 return {"error": f"Case '{args['case_id']}' not found."}, f"Case {args['case_id']} not found", None, models
             audit = self.registry.audit_case(case, models)
             return self._case_payload(audit), f"Loaded {case['case_id']}", audit, models
 
         if name == "explain_prediction":
-            case = self.registry.get_case(args["case_id"].strip().upper())
+            case = self._lookup(args["case_id"], session)
             if not case:
                 return {"error": f"Case '{args['case_id']}' not found."}, f"Case {args['case_id']} not found", None, []
             model = self.registry.get_model(args["model"])
+            prediction = case["evaluations"].get(args["model"]) or model.predict(case["features"])
             target = args.get("target_class")
-            target_idx = self.classes.index(target) if target else case["evaluations"][args["model"]]["predicted_id"]
+            target_idx = self.classes.index(target) if target else prediction["predicted_id"]
             shap = model.explain(case["features"], target_class_idx=target_idx, top_k=args.get("top_k", 5))
+            mark_filled(shap, case.get("filled", []))
             slim = lambda rows: [{"feature": r["feature"], "value": r["value"], "shap": r["shap_value"]} for r in rows]
             result = {
                 "case_id": case["case_id"],
                 "model": args["model"],
                 "explained_class": shap["target_class"],
-                "model_predicted": case["evaluations"][args["model"]]["predicted_class"],
+                "model_predicted": prediction["predicted_class"],
                 "ground_truth": case["ground_truth_class"],
                 "pushes_toward": slim(shap["top_positive"]),
                 "pushes_away": slim(shap["top_negative"]),
+                "by_attribute": [_slim_attr(r) for r in shap["by_attribute"]],  # the 6 raw attributes, % of total evidence
             }
             return result, f"SHAP for {args['model']} on {case['case_id']} → {shap['target_class']}", None, []
 
@@ -249,28 +346,29 @@ class AuditorTools:
     # ---------------------------------------------------------------- helpers
     def _case_payload(self, audit: Dict[str, Any]) -> Dict[str, Any]:
         case = audit["case"]
-        s = case["summary"]
         models = {}
         for m_name, m in audit["models"].items():
             p = m["prediction"]
-            models[m_name] = {
+            top = sorted(p.get("probabilities", {}).items(), key=lambda kv: kv[1], reverse=True)[:3]
+            entry = {
                 "predicted": p["predicted_class"],
                 "confidence": p["confidence"],
-                "correct": m["is_correct"],
-                "top_signals": [
-                    {"feature": r["feature"], "value": r["value"], "shap": r["shap_value"]}
-                    for r in m["shap"]["top_all"][:3]
-                ],
+                "correct": m["is_correct"],  # None = the user hasn't said what it really was
+                "top_probabilities": {c: v for c, v in top},
+                "shap_by_attribute": [_slim_attr(r) for r in m["shap"]["by_attribute"]],
             }
+            if m.get("contrast"):
+                c = m["contrast"]
+                entry["why_not"] = {"class": c["class"], "because": c["reason"], "probability": c["probability"],
+                                    "shap_by_attribute": [_slim_attr(r) for r in c["by_attribute"]],
+                                    "summary": c["human_explanations"]}
+            models[m_name] = entry
         return {
             "case_id": case["case_id"],
+            "source": "user-described event" if case.get("source") == "user" else "held-out test bank",
             "ground_truth": case["ground_truth_class"],
-            "country": s["country"],
-            "region": s["region"],
-            "start_month": s["start_month"],
-            "magnitude_scale": s["magnitude_scale"],
-            "magnitude_missing": s["magnitude_missing"],
-            "event_duration_log_norm": s["duration_norm"],
+            "attributes": attribute_values(case["features"]),
+            "filled_in": case.get("filled", []),
             "models": models,
             "models_disagree_in_full_bank": case.get("is_disagreement", False),
         }
@@ -296,6 +394,29 @@ class AuditorTools:
         }
 
 
+def run_tools(tools: AuditorTools, calls: List[Tuple[str, Any]], default_models: List[str],
+              session: Optional[SessionCases]) -> Tuple[List[Tuple[Dict[str, Any], bool]], List[Dict[str, Any]]]:
+    """Validate and run each (name, input) call. Returns ([(result, is_error)], [UI step events]).
+
+    Every call gets a result, even a rejected or failing one, so the LLM's transcript always stays valid."""
+    results, events = [], []
+    for name, args in calls:
+        problem = tools.validate(name, args)
+        if problem:
+            results.append(({"INVALID_JSON": json.dumps(args, default=str), "reason": problem}, True))
+            events.append({"name": name, "input": args, "summary": f"Rejected invalid input ({problem})",
+                           "is_error": True, "audit": None, "models": []})
+            continue
+        try:
+            result, summary, audit, models = tools.execute(name, args, default_models, session)
+            is_error = "error" in result
+        except Exception as e:  # keep the loop alive; let the LLM see what failed
+            result, summary, audit, models, is_error = {"error": str(e)}, f"{name} failed: {e}", None, [], True
+        results.append((result, is_error))
+        events.append({"name": name, "input": args, "summary": summary, "is_error": is_error, "audit": audit, "models": models})
+    return results, events
+
+
 class ClaudeAuditorAgent:
     """Streaming tool-use loop. `history` is the Messages API transcript and is only ever appended to."""
 
@@ -304,7 +425,8 @@ class ClaudeAuditorAgent:
         self.api_key = api_key
         self.workspace_id = (workspace_id or "").strip() or None
 
-    def run_turn(self, history: List[Dict[str, Any]], user_text: str, default_models: List[str]) -> Generator[Tuple[str, Any], None, None]:
+    def run_turn(self, history: List[Dict[str, Any]], user_text: str, default_models: List[str],
+                 session: Optional[SessionCases] = None) -> Generator[Tuple[str, Any], None, None]:
         """Yields ("text", str) for answer tokens, ("retract", n) to drop the last n streamed characters
         when a failed attempt is retried, ("tool", dict) per tool call, and ("error", str) on failure."""
         import anthropic
@@ -408,27 +530,131 @@ class ClaudeAuditorAgent:
 
             # Run every tool before yielding anything: Streamlit can stop this generator at any yield
             # (a rerun), and an assistant tool_use left without its tool_result would 400 every later turn.
-            results, events = [], []
-            for block in tool_uses:
-                problem = self.tools.validate(block.name, block.input)
-                if problem:
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "is_error": True,
-                                    "content": json.dumps({"INVALID_JSON": json.dumps(block.input, default=str), "reason": problem})})
-                    events.append({"name": block.name, "input": block.input, "summary": f"Rejected invalid input ({problem})",
-                                   "is_error": True, "audit": None, "models": []})
-                    continue
-                try:
-                    result, summary, audit, models = self.tools.execute(block.name, block.input, default_models)
-                    is_error = "error" in result
-                except Exception as e:  # keep the loop alive; let Claude see what failed
-                    result, summary, audit, models, is_error = {"error": str(e)}, f"{block.name} failed: {e}", None, [], True
-                results.append({"type": "tool_result", "tool_use_id": block.id, "is_error": is_error,
-                                "content": json.dumps(result, ensure_ascii=False, default=str)})
-                events.append({"name": block.name, "input": block.input, "summary": summary,
-                               "is_error": is_error, "audit": audit, "models": models})
+            outcomes, events = run_tools(self.tools, [(b.name, b.input) for b in tool_uses], default_models, session)
+            results = [{"type": "tool_result", "tool_use_id": b.id, "is_error": is_error,
+                        "content": json.dumps(result, ensure_ascii=False, default=str)}
+                       for b, (result, is_error) in zip(tool_uses, outcomes)]
             if rounds == MAX_TOOL_ROUNDS:
                 results.append({"type": "text", "text": "Tool budget for this question is used up. Answer now with what you have."})
             # All results for this turn go back in one user message.
             history.append({"role": "user", "content": results})
+            for ev in events:
+                yield "tool", ev
+
+
+def _plain(value: Any) -> Any:
+    """Gemini sends JSON numbers as floats (5.0); give integers back as int so validation sees 5."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
+GEMINI_HISTORY_CONTENTS = 40  # keep the transcript (with its tool results) from growing without bound
+
+
+class GeminiAuditorAgent:
+    """The same tool loop on Gemini function calling (free tier). Gemini picks the tools; we run them.
+
+    `history` is a list of google-genai Content objects. Each model turn is appended exactly as it
+    came back (thought signatures included), which Gemini requires for multi-step function calling.
+    A round is only appended once it fully succeeded, so a failed or fallback attempt leaves no trace."""
+
+    def __init__(self, tools: AuditorTools, api_key: str):
+        self.tools = tools
+        self.api_key = api_key
+
+    def _declarations(self):
+        from google.genai import types
+
+        return [types.Tool(function_declarations=[
+            types.FunctionDeclaration(name=t["name"], description=t["description"], parameters_json_schema=t["input_schema"])
+            for t in self.tools.definitions()
+        ])]
+
+    @staticmethod
+    def _trim(history: List[Any]) -> None:
+        """Drop the oldest turns, cutting only at a plain user message so no tool call loses its result."""
+        if len(history) <= GEMINI_HISTORY_CONTENTS:
+            return
+        for i in range(len(history) - GEMINI_HISTORY_CONTENTS, len(history)):
+            c = history[i]
+            if c.role == "user" and all(getattr(p, "function_response", None) is None for p in c.parts or []):
+                del history[:i]
+                return
+
+    def run_turn(self, history: List[Any], user_text: str, default_models: List[str],
+                 session: Optional[SessionCases] = None) -> Generator[Tuple[str, Any], None, None]:
+        """Same events as ClaudeAuditorAgent.run_turn: ("text"), ("retract", n), ("tool", dict), ("error")."""
+        from google.genai import errors, types
+        from src.agent import gemini_models, make_gemini_client
+
+        client = make_gemini_client(self.api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            tools=self._declarations(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),  # we run the tools
+        )
+        self._trim(history)
+        history.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
+        models = gemini_models()
+
+        for rounds in range(1, MAX_TOOL_ROUNDS + 2):
+            parts, last_err = None, None
+            for model_name in models:  # fall back to the next model on 503/429 (each has its own quota)
+                streamed, got = 0, []
+                try:
+                    for chunk in client.models.generate_content_stream(model=model_name, contents=history, config=config):
+                        for part in (chunk.candidates[0].content.parts if chunk.candidates and chunk.candidates[0].content else None) or []:
+                            got.append(part)
+                            if part.text and not part.thought:
+                                streamed += len(part.text)
+                                yield "text", part.text
+                    parts = got
+                    break
+                except errors.APIError as e:
+                    last_err = e
+                    if streamed:
+                        yield "retract", streamed  # this attempt's partial text: the next model starts over
+                    if e.code in (400, 401, 403) and "key" in str(e).lower():
+                        yield "error", "Invalid Gemini API key. Please check the key in the sidebar settings."
+                        return
+                except Exception as e:  # timeouts, connection errors
+                    last_err = e
+                    if streamed:
+                        yield "retract", streamed
+            if parts is None:
+                if getattr(last_err, "code", None) == 429:
+                    yield "error", "Gemini's free quota is used up for now. Wait a minute, or switch off agent mode in Settings."
+                else:
+                    yield "error", f"Gemini didn't answer ({last_err}). Please try again."
+                return
+
+            history.append(types.Content(role="model", parts=parts))
+            calls = [p.function_call for p in parts if p.function_call]
+            if not calls:
+                return
+            if rounds > MAX_TOOL_ROUNDS:
+                # The budget note was ignored: answer the calls without running them, so the transcript stays valid.
+                history.append(types.Content(role="user", parts=[
+                    types.Part.from_function_response(name=c.name, response={"error": "Tool budget exhausted; nothing was run."})
+                    for c in calls]))
+                yield "error", "Stopped after too many tool calls for one question. Try asking something narrower."
+                return
+
+            outcomes, events = run_tools(self.tools, [(c.name, _plain(dict(c.args or {}))) for c in calls], default_models, session)
+            responses = []
+            for call, (result, _) in zip(calls, outcomes):
+                response = types.Part.from_function_response(
+                    name=call.name, response=json.loads(json.dumps(result, ensure_ascii=False, default=str)))
+                if call.id:
+                    response.function_response.id = call.id
+                responses.append(response)
+            if rounds == MAX_TOOL_ROUNDS:
+                responses.append(types.Part(text="Tool budget for this question is used up. Answer now with what you have."))
+            history.append(types.Content(role="user", parts=responses))
             for ev in events:
                 yield "tool", ev

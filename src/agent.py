@@ -18,11 +18,22 @@ THE 3 LEAK-FREE MODELS COMPARED:
 3. XGBoost (SMOTETomek Pipeline): Test Macro-F1 = 0.8480, Accuracy = 91.47%, Recall = 86.62% (Regularized depth-wise gradient boosting).
 - Disagreement rate: The 3 models disagree on 251 out of 3,495 cases (7.2%), mostly on boundary confusions like Flood vs. Storm during monsoon seasons or Drought vs. Extreme Temperature.
 
+MODEL INPUTS (245 features from 6 pre-event attributes):
+- Country (230 one-hot columns), magnitude scale (6 one-hot: Km2, Kph, Moment Magnitude, Vaccinated, °C, Unknown), region (5 one-hot), start month (1-12), event duration (log1p of days scaled 0-1), magnitude value (log1p scaled 0-1, plus a missing flag).
+- No impact data (deaths, damage) is used, to avoid leakage. The magnitude scale is the strongest signal because each hazard is measured in its own unit.
+
+WHERE YOUR ANSWERS COME FROM:
+- Facts about the models and metrics: only the figures above.
+- Facts about a case: only the CURRENT AUDIT CASE CONTEXT below, if present.
+- Anything else (disaster science, history, general ML): your own general knowledge. When an answer relies on it, say so briefly (e.g. "From general knowledge, not the app's data: ..."). Never invent metrics, case details or SHAP values.
+
 GUIDELINES:
 - Answer user questions informatively, clearly, and authoritatively.
 - Be concise: lead with the answer, then at most 3-5 short bullets or ~150 words, unless the user asks for more detail.
 - Support both Thai and English naturally: if the user asks in Thai, reply in fluent, polite Thai (ครับ/ค่ะ); if in English, reply in English.
 - If an active audit case is provided in the context, refer to its specific metrics, ground truth, predicted class, confidence, and SHAP features.
+- READING SHAP: use the "SHAP by attribute" % shares in the context. Compare models by these shares only (raw SHAP units differ: probability for Random Forest, log-odds for LightGBM/XGBoost). An attribute marked as a filled-in default was not given by the user: never present it as a reason for the prediction; instead say the prediction may change once the user supplies it, and invite them to.
+- WHY NOT ANOTHER CLASS: when a model is WRONG, use its "Why not <true type>?" lines: name what held the true type back and what evidence both classes share. Use the runner-up lines when asked why the model didn't pick something else.
 - If asked about how models work or error diagnostics, explain the physical and seasonal disaster dynamics (e.g. why missing magnitude scales sway models toward floods, or how event duration influences epidemics vs. earthquakes)."""
 
 # Fast, current models in order of preference (measured on this project: ~1-2s to the first word).
@@ -30,6 +41,7 @@ GUIDELINES:
 # or a comma-separated list.
 DEFAULT_GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
 GEMINI_TIMEOUT_MS = 30_000
+HISTORY_TURNS = 6  # earlier chat turns sent with each question
 
 # Yielded by chat_stream when a model failed mid-answer and the next one starts over: drop the text so far.
 RESTART = object()
@@ -38,6 +50,21 @@ RESTART = object()
 def gemini_models() -> List[str]:
     configured = [m.strip() for m in os.getenv("GEMINI_MODEL", "").split(",") if m.strip()]
     return configured + [m for m in DEFAULT_GEMINI_MODELS if m not in configured]
+
+
+def make_gemini_client(api_key: str):
+    from google import genai
+    from google.genai import types
+
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            # Give up on a stalled model after 30s instead of waiting minutes, and don't let the
+            # SDK silently retry an overloaded model: callers fall back down gemini_models() instead.
+            timeout=GEMINI_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
 
 class DisasterAuditorLLM:
@@ -62,20 +89,52 @@ class DisasterAuditorLLM:
 
     @staticmethod
     def _case_context(current_case: Optional[Dict]) -> str:
-        context_str = ""
-        if current_case:
-            case_info = current_case.get("case", {})
-            models_info = current_case.get("models", {})
-            context_str = f"\n\nCURRENT AUDIT CASE CONTEXT:\n- Case ID: {case_info.get('case_id')}\n- Ground Truth: {case_info.get('ground_truth_class')}\n- Location: {case_info.get('summary', {}).get('country')} ({case_info.get('summary', {}).get('region')})\n- Timing: Month {case_info.get('summary', {}).get('start_month')}\n- Magnitude Scale: {case_info.get('summary', {}).get('magnitude_scale')}\n"
-            for m_name, m_data in models_info.items():
-                context_str += f"- {m_name} Prediction: {m_data['prediction']['predicted_class']} (Confidence: {m_data['prediction']['confidence']*100:.1f}%, Correct: {m_data['is_correct']})\n"
-                context_str += f"  Top SHAP features: {', '.join([f['feature'] for f in m_data['shap'].get('top_all', [])[:3]])}\n"
-        return context_str
+        """Everything the models saw and said about the case on screen, so Gemini explains from data, not guesses."""
+        if not current_case:
+            return ""
+        from src.event_features import attribute_values
+
+        case = current_case.get("case", {})
+        filled = set(case.get("filled", []))
+        source = "an event the user described" if case.get("source") == "user" else "the held-out test bank"
+        truth = case.get("ground_truth_class") or "not confirmed by the user yet"
+        lines = [f"\n\nCURRENT AUDIT CASE CONTEXT ({source}):", f"- Case ID: {case.get('case_id')}", f"- Ground truth: {truth}",
+                 "- The 6 attributes the models saw:"]
+        for name, value in attribute_values(case.get("features", {})).items():
+            note = "  [NOT GIVEN by the user: training default filled in]" if name in filled else ""
+            lines.append(f"    {name}: {value}{note}")
+
+        for m_name, m in current_case.get("models", {}).items():
+            pred = m["prediction"]
+            correct = "unverified" if m["is_correct"] is None else ("correct" if m["is_correct"] else "WRONG")
+            top = sorted(pred.get("probabilities", {}).items(), key=lambda kv: kv[1], reverse=True)[:3]
+            lines.append(f"- {m_name}: predicted {pred['predicted_class']} ({pred['confidence'] * 100:.1f}%, {correct}); "
+                         f"top probabilities: " + ", ".join(f"{c} {v * 100:.0f}%" for c, v in top))
+            rows = m["shap"].get("by_attribute", [])
+            if rows:
+                lines.append(f"  SHAP by attribute for {m['shap']['target_class']} (% share of this model's total evidence; + pushes toward, - away):")
+                for r in rows:
+                    note = " [filled-in default: an artefact, not a reason]" if r.get("filled") else ""
+                    lines.append(f"    {r['attribute']} = {r['value']}: {r['share']:+.1f}%{note}")
+            contrast = m.get("contrast")
+            if contrast:
+                lines.append(f"  Why not {contrast['class']} ({contrast['reason']}, {(contrast['probability'] or 0) * 100:.0f}%)? "
+                             f"SHAP by attribute toward {contrast['class']}: "
+                             + ", ".join(f"{r['attribute']} {r['share']:+.0f}%" for r in contrast["by_attribute"]))
+                lines.append("    " + "; ".join(contrast["human_explanations"]))
+
+        guess = current_case.get("llm")
+        if guess:
+            lines.append(f"- Gemini's own guess from the same 6 attributes: {guess['predicted_class']} ({guess['reason']})")
+        return "\n".join(lines) + "\n"
 
     def _build_prompt(self, user_message: str, history: List[Dict[str, str]], current_case: Optional[Dict]) -> str:
         context_str = self._case_context(current_case)
-        full_prompt = f"{SYSTEM_PROMPT}\n{context_str}\n\nUser Question:\n{user_message}"
-        return full_prompt
+        # Recent turns so follow-up questions ("why?", "and XGBoost?") make sense.
+        recent = [h for h in history if h.get("content")][-HISTORY_TURNS:]
+        convo = "".join(f"{h['role'].upper()}: {h['content'][:1500]}\n" for h in recent)
+        convo_str = f"\n\nCONVERSATION SO FAR:\n{convo}" if convo else ""
+        return f"{SYSTEM_PROMPT}\n{context_str}{convo_str}\n\nUser Question:\n{user_message}"
 
     def _stream_gemini(self, prompt: str) -> Generator[str, None, None]:
         """Stream from a pinned, fast model; fall back down a short list only if a model fails before answering.
@@ -91,15 +150,7 @@ class DisasterAuditorLLM:
             yield "\n⚠️ The `google-genai` package is not installed. Run `pip install -r requirements.txt`."
             return
 
-        client = genai.Client(
-            api_key=self.api_key,
-            http_options=types.HttpOptions(
-                # Give up on a stalled model after 30s instead of waiting minutes, and don't let the
-                # SDK silently retry an overloaded model: the fallback list below handles that.
-                timeout=GEMINI_TIMEOUT_MS,
-                retry_options=types.HttpRetryOptions(attempts=1),
-            ),
-        )
+        client = make_gemini_client(self.api_key)
 
         # Gemini's fast models answer ~1 in 5 requests with "503 high demand", sometimes mid-answer.
         # Each failure moves on to the next model; if text was already shown, RESTART tells the

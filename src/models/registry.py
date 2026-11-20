@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from src.models.rf_model import RandomForestModel
 from src.models.lgb_model import LightGBMModel
 from src.models.xgb_model import XGBoostModel
+from src.event_features import explain_contrast, mark_filled
 
 class ModelRegistry:
     def __init__(self, bank_path: str = "models/multi_model_bank.joblib", meta_path: str = "models/multi_model_metadata.json"):
@@ -81,16 +82,21 @@ class ModelRegistry:
                 # Live inference fallback
                 m = self.get_model(m_name)
                 eval_info = m.predict(case["features"])
-                eval_info["is_correct"] = bool(eval_info["predicted_id"] == case["ground_truth_id"])
+                # A user-described event has no ground truth until the user confirms it: None = unverified.
+                truth_id = case.get("ground_truth_id")
+                eval_info["is_correct"] = None if truth_id is None else bool(eval_info["predicted_id"] == truth_id)
 
             # Explain
             model_obj = self.get_model(m_name)
             shap_info = model_obj.explain(case["features"], target_class_idx=eval_info["predicted_id"])
+            # Attributes a user left out were filled with training defaults: say so instead of citing them as reasons.
+            mark_filled(shap_info, case.get("filled", []))
 
             results[m_name] = {
                 "prediction": eval_info,
                 "shap": shap_info,
-                "is_correct": eval_info["is_correct"]
+                "is_correct": eval_info["is_correct"],
+                "contrast": self.contrast(case, m_name, eval_info, shap_info),
             }
 
         return {
@@ -98,3 +104,40 @@ class ModelRegistry:
             "models": results,
             "is_disagreement": case.get("is_disagreement", False)
         }
+
+    def contrast(self, case: Dict[str, Any], model_name: str, prediction: Dict[str, Any],
+                 predicted_shap: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """'Why not X?': SHAP for the class the model did NOT pick, next to the one it did.
+
+        X is the true type when the model got it wrong (the case worth auditing), otherwise the
+        runner-up class (what it nearly said). None when the model is right and has no runner-up.
+        """
+        truth_id = case.get("ground_truth_id")
+        if truth_id is not None and truth_id != prediction["predicted_id"]:
+            target_id, reason = truth_id, "true type"
+        else:
+            ranked = sorted(prediction.get("probabilities", {}).items(), key=lambda kv: kv[1], reverse=True)
+            runner_up = next((c for c, _ in ranked if c != prediction["predicted_class"]), None)
+            if runner_up is None:
+                return None
+            target_id, reason = self.class_names.index(runner_up), "runner-up"
+        shap_info = self.get_model(model_name).explain(case["features"], target_class_idx=target_id)
+        mark_filled(shap_info, case.get("filled", []))
+        result = {
+            "class": shap_info["target_class"],
+            "reason": reason,
+            "probability": prediction.get("probabilities", {}).get(shap_info["target_class"]),
+            "by_attribute": shap_info["by_attribute"],
+        }
+        result["human_explanations"] = explain_contrast(predicted_shap, result)
+        return result
+
+    def refresh_contrast(self, audit: Dict[str, Any]) -> None:
+        """After the user confirms the true type, 'why not X?' should ask about that type."""
+        for m_name, m in audit["models"].items():
+            m["contrast"] = self.contrast(audit["case"], m_name, m["prediction"], m["shap"])
+
+    def country_regions(self) -> Dict[str, str]:
+        """Country -> region, as recorded in the test bank (used to fill in a described event's region)."""
+        return {c["summary"]["country"]: c["summary"]["region"] for c in self.cases
+                if c["summary"]["region"] != "Unknown"}
