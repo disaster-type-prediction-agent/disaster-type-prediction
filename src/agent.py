@@ -42,7 +42,7 @@ GUIDELINES:
 # or a comma-separated list.
 DEFAULT_GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
 GEMINI_TIMEOUT_MS = 30_000
-HISTORY_TURNS = 6  # earlier chat turns sent with each question
+HISTORY_TURNS = 10  # earlier chat turns sent with each question
 
 # Yielded by chat_stream when a model failed mid-answer and the next one starts over: drop the text so far.
 RESTART = object()
