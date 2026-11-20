@@ -141,7 +141,7 @@ class AuditorTools:
                         "duration_days": {"type": "number", "minimum": 0, "description": "Only if the user said how long it lasted; convert hours/weeks to days."},
                         "magnitude_value": {"type": "number", "minimum": 0,
                                             "description": "Wind speed in kph, area in km2, Richter/moment magnitude, temperature °C, or people vaccinated."},
-                        "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "Unit of magnitude_value."},
+                        "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "What was measured, even when no figure is given (e.g. 'affected area was reported' -> Km2): area Km2, wind speed Kph, Richter/moment magnitude, temperature °C, people vaccinated."},
                         "stated_true_type": {"type": "string", "enum": self.classes,
                                              "description": "Only if the user says what the event actually was."},
                         "models": models_param,
@@ -413,7 +413,8 @@ def run_tools(tools: AuditorTools, calls: List[Tuple[str, Any]], default_models:
         except Exception as e:  # keep the loop alive; let the LLM see what failed
             result, summary, audit, models, is_error = {"error": str(e)}, f"{name} failed: {e}", None, [], True
         results.append((result, is_error))
-        events.append({"name": name, "input": args, "summary": summary, "is_error": is_error, "audit": audit, "models": models})
+        events.append({"name": name, "input": args, "summary": summary, "is_error": is_error, "audit": audit,
+                       "models": models, "result": result})
     return results, events
 
 

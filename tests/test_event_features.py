@@ -66,3 +66,13 @@ def test_country_matching(registry):
     assert match_country("Bangladsh", countries) == "Bangladesh"  # small typo
     assert match_country("Atlantis", countries) is None
     assert match_country(None, countries) is None
+
+
+def test_compare_events_tolerates_rounding_but_not_wrong_values():
+    from src.event_features import compare_events
+    typed = {"country": "Thailand", "region": "Asia", "start_month": 11, "duration_days": 3,
+             "magnitude_value": 1234.0, "magnitude_scale": "Km2"}
+    assert compare_events(typed, {**typed, "magnitude_value": 1200, "duration_days": 4})["correct"] == 6
+    result = compare_events(typed, {**typed, "start_month": 10, "magnitude_scale": None})
+    assert result["correct"] == 4 and {w["attribute"] for w in result["wrong"]} == {"Start month", "Magnitude scale"}
+    assert compare_events({"magnitude_scale": "Unknown"}, {"magnitude_scale": None})["correct"] == 6

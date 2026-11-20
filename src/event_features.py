@@ -231,3 +231,47 @@ def make_event_case(event: Dict[str, Any], feature_names: List[str], case_id: st
         "evaluations": {},
         "is_disagreement": False,
     }
+
+
+def compare_events(original: Dict[str, Any], extracted: Dict[str, Any]) -> Dict[str, Any]:
+    """Did the LLM read a typed description back into the right 6 attributes?
+
+    Numbers may be rounded in the sentence, so they match within 10% (durations within a day)."""
+    def same_number(a, b, abs_tol=0.0):
+        if a is None or b is None:
+            return a is None and b is None
+        return abs(float(a) - float(b)) <= max(abs_tol, 0.10 * abs(float(a)))
+
+    def norm(v):
+        return None if v in (None, "", "Unknown") else v
+
+    # Compare what the models would see: a missing month is encoded as 1 and a missing duration as 0,
+    # so "not mentioned" and "January" / "0 days" are the same input, not a misread.
+    def month(e):
+        return e.get("start_month") or 1
+
+    def days(e):
+        return e.get("duration_days") or 0
+
+    checks = {
+        "Country": norm(original.get("country")) == norm(extracted.get("country")),
+        "Region": norm(original.get("region")) == norm(extracted.get("region")),
+        "Start month": month(original) == month(extracted),
+        "Event duration": same_number(days(original), days(extracted), abs_tol=1.0),
+        "Magnitude scale": norm(original.get("magnitude_scale")) == norm(extracted.get("magnitude_scale")),
+        "Magnitude value": same_number(original.get("magnitude_value"), extracted.get("magnitude_value")),
+    }
+    wrong = [name for name, ok in checks.items() if not ok]
+    return {
+        "correct": len(checks) - len(wrong),
+        "total": len(checks),
+        "wrong": [{"attribute": n, "typed": _event_value(original, n), "read": _event_value(extracted, n)} for n in wrong],
+    }
+
+
+_EVENT_KEYS = {"Country": "country", "Region": "region", "Start month": "start_month", "Event duration": "duration_days",
+               "Magnitude scale": "magnitude_scale", "Magnitude value": "magnitude_value"}
+
+
+def _event_value(event: Dict[str, Any], attribute: str) -> Any:
+    return event.get(_EVENT_KEYS[attribute])

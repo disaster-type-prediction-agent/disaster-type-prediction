@@ -32,7 +32,7 @@ def _schemas(classes: tuple, countries: tuple):
         start_month: Optional[int] = Field(description="Month it started, 1-12; null if not given")
         duration_days: Optional[float] = Field(description="How many days it lasted; null if not given")
         magnitude_value: Optional[float] = Field(description="Size of the event as a number (area km2, wind kph, Richter/Moment magnitude, temperature °C, people vaccinated); null if not given")
-        magnitude_scale: Optional[Scale] = Field(description="Unit of magnitude_value; null if not given")
+        magnitude_scale: Optional[Scale] = Field(description="What was measured, even when no figure is given: area -> Km2, wind speed -> Kph, magnitude/Richter -> Moment Magnitude, temperature -> °C, people vaccinated -> Vaccinated; null if the message says nothing about it")
 
     class Route(BaseModel):
         intent: Literal["test_bank_case", "new_event", "question"] = Field(
@@ -79,11 +79,11 @@ def match_country(name: Optional[str], countries: List[str]) -> Optional[str]:
     return lowered[close[0]] if close else None
 
 
-def _generate_json(api_key: str, prompt: str, schema) -> Optional[BaseModel]:
+def _generate_json(api_key: str, prompt: str, schema, temperature: float = 0) -> Optional[BaseModel]:
     from google.genai import types
 
     client = make_gemini_client(api_key)
-    config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=0)
+    config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=temperature)
     for model in gemini_models():
         try:
             response = client.models.generate_content(model=model, contents=prompt, config=config)
@@ -128,3 +128,46 @@ def llm_guess(api_key: str, event: Dict[str, Any], classes: List[str], countries
     guess = result.model_dump()
     guess["confidence"] = max(0.0, min(1.0, float(guess["confidence"])))
     return guess
+
+
+class _Scenario(BaseModel):
+    message: str = Field(description="The chat message the person would type")
+
+
+DISASTER_WORDS = ["drought", "earthquake", "epidemic", "heat wave", "heatwave", "cold wave", "flood",
+                  "landslide", "storm", "typhoon", "hurricane", "cyclone", "wildfire", "bushfire", "fire",
+                  "ภัยแล้ง", "แผ่นดินไหว", "โรคระบาด", "คลื่นความร้อน", "น้ำท่วม", "อุทกภัย", "ดินถล่ม", "พายุ", "ไต้ฝุ่น", "ไฟป่า"]
+
+
+MEASURED_AS = {"Km2": "the affected area (km²)", "Kph": "the wind speed (km/h)", "Moment Magnitude": "the magnitude",
+               "°C": "the temperature (°C)", "Vaccinated": "the number of people vaccinated"}
+
+
+def _unmeasured_hint(event: Dict[str, Any]) -> str:
+    """A unit without a value still tells the models a lot (Km2 vs Kph), so the message must carry it."""
+    scale = event.get("magnitude_scale")
+    if event.get("magnitude_value") is None and scale in MEASURED_AS:
+        return (f"\n- Size: what was measured is {MEASURED_AS[scale]}, but no figure was recorded. "
+                "Say that this was measured or reported without giving a number.")
+    return ""
+
+
+def write_scenario(api_key: str, event: Dict[str, Any], language: str = "Thai") -> Optional[str]:
+    """Turn a test-bank case's 6 attributes into a message a person might type, WITHOUT the disaster type.
+
+    The writer never sees the true type, so it cannot leak it; messages that still name a hazard are rejected."""
+    prompt = (
+        "Write ONE short message (1-2 sentences) that a person might type into a disaster-classification chat app, "
+        f"in {language}, describing the event below so the app can classify it.\n"
+        "Rules: include every known detail in natural everyday wording (you may round numbers and use units like "
+        "km/h, km², degrees, magnitude, people vaccinated, days or weeks); leave out anything marked unknown or not "
+        "recorded; add no other details; NEVER name or hint at the type of disaster (no words like storm, flood, "
+        "earthquake, drought, fire, epidemic, heat wave, landslide).\n\n"
+        f"{describe_event(event)}"
+        + _unmeasured_hint(event)
+    )
+    for _ in range(2):  # one retry if the message names a hazard anyway
+        result = _generate_json(api_key, prompt, _Scenario, temperature=0.9)  # varied wording, like real users
+        if result and result.message.strip() and not any(w in result.message.lower() for w in DISASTER_WORDS):
+            return result.message.strip()
+    return None

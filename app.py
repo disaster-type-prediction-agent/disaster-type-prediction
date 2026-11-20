@@ -12,8 +12,11 @@ load_dotenv()
 
 from src.agent import RESTART, DisasterAuditorLLM
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
-from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case
-from src.llm_tasks import llm_guess, route_question
+from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
+from src.llm_tasks import llm_guess, route_question, write_scenario
+from src.answer_check import check_answer
+from src.agent import SYSTEM_PROMPT as CHAT_PROMPT
+from src.auditor_agent import SYSTEM_PROMPT as AGENT_PROMPT
 from src.models.registry import ModelRegistry
 
 # One minimal mark for the whole app: browser tab, sidebar title, assistant avatar and greeting.
@@ -480,6 +483,10 @@ DEFAULTS = {
     # Gemini agent mode: Gemini picks the tools itself (function calling); off = fixed route-then-answer flow.
     "gemini_agent": True,
     "gemini_agent_history": [],  # google-genai Content objects, tool calls and results included
+    # Optional LLM baseline: Gemini also guesses the type on its own. Off: the ML models are the only predictors.
+    "llm_baseline": False,
+    # A Typed test in flight: a test-bank case Gemini rewrote as a typed message (true type kept from Gemini).
+    "typed_test": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -507,22 +514,34 @@ def record_audit(case, models_to_test):
 
 
 def register_audit(audit_result, models_to_test):
-    """Make an audit the active case, get Gemini's own guess for it, and score it if the true type is known."""
+    """Make an audit the active case, attach the optional LLM baseline, and score it if the true type is known."""
     st.session_state.last_audit = audit_result
+    tag_typed_test(audit_result)
     attach_llm_guess(audit_result)
     score_audit(audit_result)
 
 
+def tag_typed_test(audit):
+    """The first event classified during a Typed test is that test's: give it the hidden true type and
+    record how well the LLM read the 6 attributes back from the typed message."""
+    test, case = st.session_state.typed_test, audit["case"]
+    if not test or case.get("source") != "user" or case.get("typed_test"):
+        return
+    st.session_state.typed_test = None
+    case["typed_test"] = {"from_case": test["case_id"], "read": compare_events(test["event"], case["event"])}
+    set_true_type(audit, test["truth"])
+
+
 def attach_llm_guess(audit):
     """Gemini predicts the type from the same 6 attributes the models see, so the two can be scored side by side."""
-    if "llm" in audit:
+    if "llm" in audit or not st.session_state.llm_baseline:
         return
     key = st.session_state.gemini_api_key.strip()
     if not key:
         audit["llm"] = None
         return
     case = audit["case"]
-    with st.spinner("Gemini is making its own guess…"):
+    with st.spinner("Gemini baseline is making its own guess…"):
         guess = llm_guess(key, case.get("event") or event_from_case(case), registry.class_names, COUNTRIES)
     if guess:
         truth = case.get("ground_truth_class")
@@ -540,19 +559,27 @@ def score_audit(audit):
     model_name = next(iter(audit["models"]))  # the active model; in compare mode, the first one
     pred = audit["models"][model_name]["prediction"]
     guess = audit.get("llm")
+    typed = case.get("typed_test")
     records.append({
         "case_id": case["case_id"],
-        "source": "Your event" if case.get("source") == "user" else "Test bank",
+        "source": "Typed test" if typed else "Your event" if case.get("source") == "user" else "Test bank",
         "true_type": truth,
         "model": model_name,
         "model_prediction": pred["predicted_class"],
         "model_confidence": round(pred["confidence"], 4),
         "gemini_prediction": guess["predicted_class"] if guess else None,
+        "from_case": typed["from_case"] if typed else None,
+        "attributes_read_correctly": typed["read"]["correct"] if typed else None,
     })
 
 
 def confirm_true_type(audit, truth):
     """The user says what their event really was: mark every prediction right or wrong, then score it."""
+    set_true_type(audit, truth)
+    score_audit(audit)
+
+
+def set_true_type(audit, truth):
     case = audit["case"]
     case["ground_truth_class"] = truth
     case["ground_truth_id"] = registry.class_names.index(truth)
@@ -561,7 +588,6 @@ def confirm_true_type(audit, truth):
     if audit.get("llm"):
         audit["llm"]["is_correct"] = audit["llm"]["predicted_class"] == truth
     registry.refresh_contrast(audit)  # "why not X?" now asks about the confirmed type
-    score_audit(audit)
 
 
 def _score(pairs):
@@ -575,16 +601,22 @@ def _score(pairs):
     }
 
 
+SOURCES = ["Test bank", "Typed test", "Your event"]
+
+
 def session_scores():
-    """Model vs Gemini on the cases scored this session (Gemini only where it made a guess)."""
+    """The ML model's scores this session, overall and per source (plus the optional Gemini baseline)."""
     records = st.session_state.stats["records"]
     threshold = st.session_state.hard_threshold
+    typed = [r for r in records if r["source"] == "Typed test"]
     return {
         "model": _score([(r["true_type"], r["model_prediction"]) for r in records]),
+        "by_source": {src: _score([(r["true_type"], r["model_prediction"]) for r in records if r["source"] == src])
+                      for src in SOURCES},
         "gemini": _score([(r["true_type"], r["gemini_prediction"]) for r in records if r["gemini_prediction"]]),
+        # How often the LLM read the typed message back into the right attribute values.
+        "attributes_read": (sum(r["attributes_read_correctly"] for r in typed) / (6 * len(typed))) if typed else None,
         "tested": len(records),
-        "test_bank": sum(r["source"] == "Test bank" for r in records),
-        "user_events": sum(r["source"] == "Your event" for r in records),
         # Hard case: the model was wrong, or right with confidence below the threshold in settings.
         "hard_cases": sum(r["model_prediction"] != r["true_type"] or r["model_confidence"] < threshold for r in records),
     }
@@ -651,6 +683,27 @@ def handle_slash_command(command_text: str):
         st.toast(f"Unrecognized command '{command_text}'. Try /random, /hard, /compare, /category <name>, /export", icon=":material/help:")
 
 
+def start_typed_test(disaster_type=None):
+    """Rewrite a random test case as a typed message (without its type) and send it like a user question."""
+    case = registry.get_random_case(disaster_type=disaster_type)
+    if not case:
+        st.toast("No test case matches that category.", icon=":material/warning:")
+        return
+    event = event_from_case(case)
+    with st.spinner("Gemini is writing the test case as a typed message…"):
+        message = write_scenario(st.session_state.gemini_api_key.strip(), event,
+                                 language="Thai" if len(st.session_state.stats["records"]) % 2 == 0 else "English")
+    if not message:
+        st.toast("Gemini couldn't write the message (busy or out of quota). Try again.", icon=":material/warning:")
+        return
+    st.session_state.typed_test = {"case_id": case["case_id"], "truth": case["ground_truth_class"], "event": event,
+                                   "message": message}
+    st.session_state.messages.append({"role": "user", "content": message,
+                                      "typed_test_of": case["case_id"]})
+    st.session_state.pending_question = message
+    st.rerun()
+
+
 def submit_question(text: str):
     """Show the user's turn right away; the reply streams on the next run."""
     st.session_state.messages.append({"role": "user", "content": text})
@@ -670,6 +723,9 @@ def gemini_agent_enabled():
 def answer_pending_question():
     question = st.session_state.pending_question
     st.session_state.pending_question = None
+    test = st.session_state.typed_test
+    if test and test["message"] != question:
+        st.session_state.typed_test = None  # an earlier typed test that never reached the model
     if claude_agent_enabled() or gemini_agent_enabled():
         answer_with_agent(question)
     else:
@@ -732,6 +788,7 @@ def answer_with_agent(question):
             elif kind == "tool":
                 step = {
                     "label": payload["summary"],
+                    "result": payload.get("result"),
                     "is_error": payload["is_error"],
                     "detail": f"`{payload['name']}` {json.dumps(payload['input'], ensure_ascii=False)}",
                 }
@@ -755,8 +812,15 @@ def answer_with_agent(question):
     sources = (f"Based on {len(used)} tool result{'s' if len(used) != 1 else ''} ({', '.join(used)}) "
                f"and {llm_name}'s general knowledge where the answer says so." if used
                else f"No tools used: {llm_name}'s general knowledge and the app's built-in facts.")
+    # New case cards must have their prediction named; other tool answers are checked on the figures they quote.
+    tool_results = [s.get("result") for s in steps if not s["is_error"]]
+    check = None
+    if tool_results:
+        check = check_answer(text, [item["audit"] for item in audits] or [st.session_state.last_audit],
+                             tool_results + [registry.leaderboard, registry.mcnemar, AGENT_PROMPT],
+                             name_prediction=bool(audits))
     st.session_state.messages.append({"role": "assistant", "content": text, "steps": steps, "audits": audits,
-                                      "sources": sources})
+                                      "sources": sources, "check": check})
     st.rerun()
 
 
@@ -848,9 +912,12 @@ def answer_with_plain_llm(question):
             # RESTART: the model failed mid-answer and a fallback model is starting over.
             reply = "" if piece is RESTART else reply + piece
             answer_ph.markdown(reply)
+    check = (check_answer(reply, [st.session_state.last_audit], [registry.leaderboard, registry.mcnemar, CHAT_PROMPT])
+             if prov_code == "gemini" and gemini_key and result else None)
     st.session_state.messages.append({
         "role": "assistant", "content": reply,
         "sources": answer_sources(st.session_state.last_audit, prov_code),
+        "check": check,
     })
     st.rerun()
 
@@ -875,7 +942,8 @@ def render_audit_card(audit, tested_models, key_suffix):
     with st.container(border=True):
         if is_user_event:
             truth_text = f"true type **{truth}**" if truth else "true type **not confirmed yet**"
-            st.markdown(f":material/edit_note: **Your event {case['case_id']}** · {truth_text}")
+            label = "Typed test" if case.get("typed_test") else "Your event"
+            st.markdown(f":material/edit_note: **{label} {case['case_id']}** · {truth_text}")
             event = case["event"]
             details = [f"{summary['country']} ({summary['region']})",
                        f"month {event['start_month']}" if event.get("start_month") else "month not given"]
@@ -886,6 +954,12 @@ def render_audit_card(audit, tested_models, key_suffix):
             else:
                 details.append(f"magnitude scale `{summary['magnitude_scale']}`")
             st.caption(" · ".join(details))
+            typed = case.get("typed_test")
+            if typed:
+                read = typed["read"]
+                misread = "; ".join(f"{w['attribute']}: typed {w['typed']}, read {w['read']}" for w in read["wrong"])
+                st.caption(f":material/keyboard: Typed test from {typed['from_case']} · the LLM read "
+                           f"**{read['correct']}/{read['total']}** attributes correctly" + (f" ({misread})" if misread else ""))
             if case.get("filled"):
                 st.caption(f":orange[:material/info:] Not given, filled with training defaults: {', '.join(case['filled'])}. "
                            "Add them for a more reliable prediction.")
@@ -955,6 +1029,9 @@ def render_message(msg, idx):
     if msg["role"] == "user":
         with st.chat_message("user"):
             st.markdown(msg["content"])
+            if msg.get("typed_test_of"):
+                st.caption(f":material/keyboard: Typed test written by Gemini from {msg['typed_test_of']} "
+                           "(its true type is hidden until the model has predicted)")
         return
     with st.chat_message("assistant", avatar=APP_ICON):
         if msg.get("steps"):
@@ -969,6 +1046,12 @@ def render_message(msg, idx):
             st.markdown(msg["content"])
         if msg.get("sources"):
             st.caption(f":material/info: {msg['sources']}")
+        check = msg.get("check")
+        if check:
+            if check["ok"]:
+                st.caption(":green[:material/verified:] Explanation matches the model's output")
+            else:
+                st.caption(":orange[:material/warning:] Explanation doesn't match the model's output: " + "; ".join(check["issues"]))
 
 
 def sync_model_picker():
@@ -1223,18 +1306,23 @@ def render_export():
     def f1(v):
         return f"{v:.4f}" if v is not None else "—"
 
-    st.markdown("**Session: ML model vs Gemini** (same cases)")
-    compare_df = pd.DataFrame([
-        {"Predictor": "ML model", "Cases scored": scores["model"]["n"],
-         "Accuracy": pct(scores["model"]["accuracy"]), "Macro-F1": f1(scores["model"]["macro_f1"])},
-        {"Predictor": "Gemini (LLM)", "Cases scored": scores["gemini"]["n"],
-         "Accuracy": pct(scores["gemini"]["accuracy"]), "Macro-F1": f1(scores["gemini"]["macro_f1"])},
-    ])
+    st.markdown("**Session: the ML model by source**")
+    rows = [{"Source": "All", "Cases scored": scores["model"]["n"],
+             "Accuracy": pct(scores["model"]["accuracy"]), "Macro-F1": f1(scores["model"]["macro_f1"])}]
+    rows += [{"Source": src, "Cases scored": sc["n"], "Accuracy": pct(sc["accuracy"]), "Macro-F1": f1(sc["macro_f1"])}
+             for src, sc in scores["by_source"].items()]
+    if scores["gemini"]["n"]:
+        rows.append({"Source": "Gemini baseline (own guess)", "Cases scored": scores["gemini"]["n"],
+                     "Accuracy": pct(scores["gemini"]["accuracy"]), "Macro-F1": f1(scores["gemini"]["macro_f1"])})
+    compare_df = pd.DataFrame(rows)
     st.dataframe(compare_df, hide_index=True)
+    read = scores["attributes_read"]
     st.caption(
-        f"{scores['test_bank']} test-bank cases and {scores['user_events']} of your own events · "
-        f"{scores['hard_cases']} hard cases · {registry.metadata['disagreement_cases']} disagreement cases in the bank. "
-        "A handful of cases is a small sample: compare with the full test-set figures on the Leaderboard tab."
+        "Test bank = the model on the recorded features. Typed test = the same kind of case written as a message, "
+        "read by the LLM, then predicted by the model: the gap between the two is what typing costs. "
+        + (f"The LLM read {read:.0%} of typed-test attributes correctly. " if read is not None else "")
+        + f"{scores['hard_cases']} hard cases. A handful of cases is a small sample: compare with the full "
+        "test-set figures on the Leaderboard tab."
     )
 
     records = pd.DataFrame(st.session_state.stats["records"])
@@ -1280,17 +1368,28 @@ with st.sidebar:
     def fmt(value, pattern):
         return pattern.format(value) if value is not None else "—"
 
-    st.markdown("**This session**")
-    st.caption(f"{scores['tested']} scored · {scores['test_bank']} from the test bank · {scores['user_events']} your events")
+    st.markdown("**This session · ML model**")
     with st.container(horizontal=True):
         st.metric("Model Macro-F1", fmt(scores["model"]["macro_f1"], "{:.3f}"),
-                  help="Macro-F1 of the active ML model over the cases scored this session")
+                  help="Macro-F1 of the active ML model over every case scored this session")
         st.metric("Model accuracy", fmt(scores["model"]["accuracy"], "{:.0%}"))
-    gemini_help = ("Gemini's own guess from the same 6 attributes the models see, scored on the same cases"
-                   if st.session_state.gemini_api_key.strip() else "Add a Gemini key in Settings to compare the LLM")
-    with st.container(horizontal=True):
-        st.metric("Gemini Macro-F1", fmt(scores["gemini"]["macro_f1"], "{:.3f}"), help=gemini_help)
-        st.metric("Gemini accuracy", fmt(scores["gemini"]["accuracy"], "{:.0%}"), help=gemini_help)
+    st.dataframe(
+        pd.DataFrame([{"Source": src, "Cases": sc["n"], "Accuracy": fmt(sc["accuracy"], "{:.0%}"),
+                       "Macro-F1": fmt(sc["macro_f1"], "{:.3f}")}
+                      for src, sc in scores["by_source"].items()]),
+        hide_index=True,
+    )
+    st.caption(
+        "Test bank: the model gets the recorded features. Typed test / Your event: someone types it, the LLM "
+        "reads it into the 6 attributes, then the model predicts."
+        + (f" The LLM read {scores['attributes_read']:.0%} of typed-test attributes correctly."
+           if scores["attributes_read"] is not None else "")
+    )
+    if st.session_state.llm_baseline:
+        with st.container(horizontal=True):
+            st.metric("Gemini baseline F1", fmt(scores["gemini"]["macro_f1"], "{:.3f}"),
+                      help="Optional: Gemini guessing the type itself from the same 6 attributes, on the same cases")
+            st.metric("Baseline accuracy", fmt(scores["gemini"]["accuracy"], "{:.0%}"))
     with st.container(horizontal=True):
         st.metric("Tested", scores["tested"])
         st.metric("Hard cases", scores["hard_cases"],
@@ -1303,9 +1402,14 @@ with st.sidebar:
             ["All categories"] + registry.class_names,
             label_visibility="collapsed",
         )
-        if st.button("Run", icon=":material/play_arrow:"):
-            target_cat = None if cat_select == "All categories" else cat_select
+        target_cat = None if cat_select == "All categories" else cat_select
+        if st.button("Run", icon=":material/play_arrow:", help="The model gets a test case's recorded features"):
             run_audit(registry.get_random_case(disaster_type=target_cat), f"Audit a **{cat_select}** case")
+    if st.button("Typed test", icon=":material/keyboard:", width="stretch",
+                 disabled=not st.session_state.gemini_api_key.strip(),
+                 help="Gemini rewrites a random test case of this category as a typed message (without its type); "
+                      "it then goes through the chat like anything you type, and is scored against the real answer."):
+        start_typed_test(target_cat)
 
     is_gemini = st.session_state.api_provider == "Google Gemini"
     active_key = st.session_state.gemini_api_key if is_gemini else st.session_state.claude_api_key
@@ -1348,6 +1452,16 @@ with st.sidebar:
             if agent_mode != st.session_state.gemini_agent:
                 st.session_state.gemini_agent = agent_mode
                 st.rerun()
+        baseline = st.toggle(
+            "LLM baseline",
+            value=st.session_state.llm_baseline,
+            disabled=not st.session_state.gemini_api_key.strip(),
+            help="Optional comparison: Gemini also guesses the disaster type itself from the same 6 attributes, "
+                 "scored next to the ML model. The ML model is always the predictor; this costs one Gemini call per case.",
+        )
+        if baseline != st.session_state.llm_baseline:
+            st.session_state.llm_baseline = baseline
+            st.rerun()
         else:
             ant_key = st.text_input(
                 "Anthropic API key",

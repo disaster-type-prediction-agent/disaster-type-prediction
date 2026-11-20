@@ -55,7 +55,7 @@ def test_described_event_waits_for_confirmation_then_scores(chat):
     case = audit["case"]
     assert case["case_id"] == "EVENT-1" and case["source"] == "user"
     assert case["summary"]["region"] == "Asia", "region filled in from the country"
-    assert audit["llm"]["predicted_class"] == "Flood" and audit["llm"]["is_correct"] is None
+    assert "llm" not in audit, "the LLM baseline is off by default: only the ML model predicts"
     assert records(at) == [], "no score until the user says what it really was"
 
     idx = next(i for i, m in enumerate(at.session_state["messages"]) if m.get("audit"))
@@ -63,21 +63,30 @@ def test_described_event_waits_for_confirmation_then_scores(chat):
     at.button(key=f"confirm_EVENT-1_{idx}").click().run()
     assert not at.exception
     [rec] = records(at)
-    assert rec["source"] == "Your event" and rec["true_type"] == "Flood" and rec["gemini_prediction"] == "Flood"
+    assert rec["source"] == "Your event" and rec["true_type"] == "Flood" and rec["gemini_prediction"] is None
 
 
 def test_stated_true_type_scores_immediately(chat):
     at, ask = chat
     ask("Storm in Bangladesh ... it was actually a Storm", route_for(event_truth="Storm"))
     [rec] = records(at)
-    assert rec["true_type"] == "Storm" and rec["gemini_prediction"] == "Flood"
+    assert rec["true_type"] == "Storm" and rec["model_prediction"]
 
 
-def test_test_bank_request_scores_model_and_gemini(chat):
+def test_test_bank_request_scores_the_model(chat):
     at, ask = chat
     ask("give me a random case", route_for(intent="test_bank_case"))
     [rec] = records(at)
-    assert rec["source"] == "Test bank" and rec["gemini_prediction"] == "Flood"
+    assert rec["source"] == "Test bank" and rec["gemini_prediction"] is None
+    assert at.session_state["stats"]["records"] and not at.exception
+
+
+def test_llm_baseline_is_opt_in_and_scored_beside_the_model(chat):
+    at, ask = chat
+    at.session_state["llm_baseline"] = True
+    ask("give me a random case", route_for(intent="test_bank_case"))
+    [rec] = records(at)
+    assert rec["gemini_prediction"] == "Flood"
 
 
 def test_plain_question_changes_nothing_and_cites_sources(chat):

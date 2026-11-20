@@ -121,4 +121,26 @@ def test_app_agent_mode_shows_the_event_card_and_scores_it(app):
     last = at.session_state["messages"][-1]
     assert last["content"] == "Storm, as you said." and "classify_event" in last["sources"]
     [rec] = at.session_state["stats"]["records"]
-    assert rec["case_id"] == "EVENT-1" and rec["true_type"] == "Storm" and rec["gemini_prediction"] == "Storm"
+    assert rec["case_id"] == "EVENT-1" and rec["true_type"] == "Storm" and rec["gemini_prediction"] is None
+    assert last["check"]["ok"], last["check"]  # the answer names the model's prediction
+
+
+def test_typed_test_scores_the_model_and_how_well_gemini_read_the_message(app, registry):
+    """Typed test: a test case becomes a message; Gemini (faked) reads it; the model is scored on the real type."""
+    case = next(c for c in registry.cases if c["ground_truth_class"] == "Storm" and not c["summary"]["magnitude_missing"])
+    from src.event_features import event_from_case
+    event = event_from_case(case)
+    at = app({"GEMINI_API_KEY": "AIzaSyFAKE"})
+    read_back = {k: v for k, v in event.items() if v is not None}
+    read_back["start_month"] = (event["start_month"] % 12) + 1  # Gemini misreads the month
+    script = [[chunk(call("classify_event", **read_back))], [chunk(types.Part(text="The model says Storm."))]]
+    with mock.patch("src.llm_tasks.write_scenario", return_value="A message without the type"), \
+         mock.patch("src.models.registry.ModelRegistry.get_random_case", return_value=case), \
+         mock.patch("src.agent.make_gemini_client", return_value=FakeClient(script)):
+        typed_button = next(b for b in at.button if b.label == "Typed test")
+        typed_button.click().run()
+    assert not at.exception, at.exception
+    [rec] = at.session_state["stats"]["records"]
+    assert rec["source"] == "Typed test" and rec["from_case"] == case["case_id"] and rec["true_type"] == "Storm"
+    assert rec["attributes_read_correctly"] == 5, "5 of 6 attributes read correctly (the month was wrong)"
+    assert at.session_state["typed_test"] is None
