@@ -45,7 +45,7 @@ def classify(tools, case, message):
     event = event_from_case(case)
     args = {k: event[k] for k in ("country", "start_month", "duration_days") if event.get(k) is not None}
     session = SessionCases()
-    session.message = message
+    session.message, session.asked_details_on = message, "an earlier question"  # already asked: run regardless
     result, _, audit, _ = tools.execute("classify_event", args, ["Random Forest"], session)
     return result, audit
 
@@ -67,7 +67,7 @@ def test_classify_event_recovers_the_scale_and_the_right_answer(tools, registry)
 def test_the_llm_reading_wins_over_the_keywords(tools, registry):
     session = SessionCases()
     session.message = "temperatures were reported"
-    _, _, audit, _ = tools.execute("classify_event", {"country": "Thailand", "magnitude_scale": "Kph"},
+    _, _, audit, _ = tools.execute("classify_event", {"country": "Thailand", "magnitude_scale": "Kph", "start_month": 11},
                                    ["Random Forest"], session)
     assert audit["case"]["event"]["magnitude_scale"] == "Kph"
 

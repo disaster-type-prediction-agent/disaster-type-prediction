@@ -24,6 +24,7 @@ from pathlib import Path
 OUT_DIR = Path("reports/typed_eval")
 RESULTS = OUT_DIR / "results.jsonl"
 MODELS = ["Random Forest", "LightGBM", "XGBoost"]
+NO_MORE = {"Thai": "ไม่ทราบรายละเอียดอื่นแล้ว เท่าที่บอกไปคือทั้งหมด", "English": "I don't know any other details; that's all I have."}
 ATTRIBUTES = ["Country", "Region", "Start month", "Event duration", "Magnitude scale", "Magnitude value"]
 
 
@@ -66,18 +67,32 @@ def run_case(case, index, key, tools, registry, calls):
         return record
     record["message"] = message
 
-    session, text, tool_names, error = SessionCases(), "", [], None
-    session.message = message
-    for kind, payload in GeminiAuditorAgent(tools, key).run_turn([], message, MODELS, session):
-        if kind == "text":
-            text += payload
-        elif kind == "retract":
-            text = text[:-payload]
-        elif kind == "tool":
-            tool_names.append(payload["name"])
-        elif kind == "error":
-            error = payload
-    record.update({"tools": tool_names, "answer": text, "agent_error": error, "gemini_calls": calls["n"] - start})
+    agent, history, session = GeminiAuditorAgent(tools, key), [], SessionCases()
+    tool_names, error, asked_back = [], None, None
+
+    def turn(user_text):
+        nonlocal error
+        session.message = user_text
+        text = ""
+        for kind, payload in agent.run_turn(history, user_text, MODELS, session):
+            if kind == "text":
+                text += payload
+            elif kind == "retract":
+                text = text[:-payload]
+            elif kind == "tool":
+                tool_names.append(payload["name"])
+            elif kind == "error":
+                error = payload
+        return text
+
+    text = turn(message)
+    if not session.cases and session.asked_details_on:
+        # The app asked for more details. The message already holds everything the case records, so answer
+        # the way a user who knows nothing more would, and the models then run on what was given.
+        asked_back = text
+        text = turn(NO_MORE[language])
+    record.update({"tools": tool_names, "answer": text, "asked_back": asked_back, "agent_error": error,
+                   "gemini_calls": calls["n"] - start})
 
     typed_case = next(iter(session.cases.values()), None)
     if typed_case is None:
@@ -181,6 +196,9 @@ def summarize():
               f"- All 6 attributes read correctly: **{sum(r['read']['correct'] == 6 for r in ran)}/{len(ran)}**",
               f"- Attributes read correctly overall: **{sum(r['read']['correct'] for r in ran) / (6 * len(ran)):.1%}**"
               if ran else "- (no cases ran)"]
+    if any("asked_back" in r for r in records):  # recorded since the app started asking back
+        asked = [r for r in records if r.get("asked_back")]
+        lines.append(f"- Asked the user for more details first (too little given): **{len(asked)}/{n}**")
     checked = [r for r in ran if r.get("explanation_ok") is not None]
     if checked:
         lines.append(f"- Explanations matching the model output: **{sum(r['explanation_ok'] for r in checked)}/{len(checked)}**")

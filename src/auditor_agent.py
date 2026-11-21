@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled,
-                                scale_from_text)
+                                missing_details, scale_from_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -18,6 +18,7 @@ How to work:
 - Use the tools for every fact about the models, metrics, cases or SHAP values. Never state a metric, count, confidence or SHAP value you did not get from a tool in this conversation.
 - When the user wants to see, test or find a case, call find_case (or get_case for a specific id). The app shows each case you load as a card, so summarize what matters instead of repeating every field.
 - When the user describes a specific event of their own (a place, month, duration, or size such as wind speed or area), call classify_event with only the details they actually gave; pass stated_true_type only if they say what it really was. Then tell them which attributes were missing (filled with training defaults) and that adding them may change the prediction.
+- If classify_event returns need_more_details, the models did not run: ask the user for those details (one short question) and stop; never predict or hint at a type yourself. On their next message, call classify_event again with everything they've said so far (it runs then, even if they don't know the rest; if they say nothing was measured, pass nothing_measured=true).
 - To revisit a case already loaded or classified (another model, why not X, more detail), use get_case or explain_prediction with its id (EVENT-n or CASE-n). Call classify_event again only when the user changes or adds event details; otherwise you'd create a duplicate event.
 - Write for people: say "not given (default used)" and "% of the evidence", never raw field names like filled_in or share_pct.
 - If the question is about particular models, pass them in `models`; otherwise leave it out to use the models selected in the UI.
@@ -66,6 +67,7 @@ class SessionCases:
         self.cases: Dict[str, Dict[str, Any]] = {}
         self.counter = 0
         self.message = ""  # the user's latest message as typed (no UI context), for checks done in code
+        self.asked_details_on: Optional[str] = None  # the message on which classify_event asked for more details
 
     def next_id(self) -> str:
         self.counter += 1
@@ -132,7 +134,8 @@ class AuditorTools:
                     "Run the models on an event the user describes (not from the test bank) and show it as a case card. "
                     "Pass ONLY values the user explicitly stated. Never estimate, assume or invent a value (no typical "
                     "durations or sizes): omit it, and the app fills the training default and reports it as filled_in. "
-                    "Returns predictions, SHAP per attribute and why_not."
+                    "Returns predictions, SHAP per attribute and why_not. If too little is given, it returns "
+                    "need_more_details instead and runs nothing: ask the user for those details."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -144,6 +147,9 @@ class AuditorTools:
                         "magnitude_value": {"type": "number", "minimum": 0,
                                             "description": "Wind speed in kph, area in km2, Richter/moment magnitude, temperature °C, or people vaccinated."},
                         "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "What was measured, even when no figure is given (e.g. 'affected area was reported' -> Km2): area Km2, wind speed Kph, Richter/moment magnitude, temperature °C, people vaccinated."},
+                        "nothing_measured": {"type": "boolean", "description": (
+                            "Only if the user said no size or measurement was recorded for the event (not just that "
+                            "they don't know). Leave magnitude_scale and magnitude_value out then.")},
                         "stated_true_type": {"type": "string", "enum": self.classes,
                                              "description": "Only if the user says what the event actually was."},
                         "models": models_param,
@@ -222,6 +228,7 @@ class AuditorTools:
             ok = (_enum_or_none(args.get("region"), REGIONS)
                   and _enum_or_none(args.get("magnitude_scale"), MAGNITUDE_SCALES)
                   and _enum_or_none(args.get("stated_true_type"), self.classes)
+                  and bool_ok("nothing_measured")
                   and (args.get("country") is None or isinstance(args["country"], str))
                   and (month is None or (isinstance(month, int) and not isinstance(month, bool) and 1 <= month <= 12))
                   and all(n is None or (isinstance(n, (int, float)) and not isinstance(n, bool) and n >= 0) for n in numbers)
@@ -266,11 +273,29 @@ class AuditorTools:
             }
             session = session or SessionCases()
             notes = []
-            if event["magnitude_scale"] in (None, "Unknown"):
+            nothing_measured = bool(args.get("nothing_measured")) and args.get("magnitude_value") is None
+            if nothing_measured:
+                event["magnitude_scale"] = "Unknown"  # a real answer, like the recorded cases with no measurement
+            elif event["magnitude_scale"] in (None, "Unknown"):
+                event["magnitude_scale"] = None  # not said: a filled-in default, flagged as such
                 scale = scale_from_text(session.message)
                 if scale:  # the LLM left it out, but the message names what was measured
                     event["magnitude_scale"] = scale
                     notes.append(f"Magnitude scale {scale} was read from the message by the app.")
+            missing = missing_details(event, nothing_measured)
+            answered = session.asked_details_on is not None and session.asked_details_on != session.message
+            if missing and not answered:
+                # Too little to predict from: ask first. Decided here in code, not left to the LLM. Asked once:
+                # whatever the user's next message adds, the models run on it (no loop of questions).
+                session.asked_details_on = session.message
+                given = {k: v for k, v in event.items() if v not in (None, "", "Unknown")}
+                return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
+                         "instruction": (
+                             "The models were NOT run. Ask the user, in one short question in their language, for the "
+                             "missing details listed, with an example or two. Say they can answer that they don't know, "
+                             "and the app will then run the models with default values. Do not guess the disaster type.")},
+                        "Asked for more details", None, [])
+            session.asked_details_on = None
             case = make_event_case(event, self.registry.feature_names, session.next_id(),
                                    truth=args.get("stated_true_type"), class_names=self.classes)
             session.add(case)

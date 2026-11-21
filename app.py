@@ -806,8 +806,9 @@ def answer_pending_question():
     question = st.session_state.pending_question
     st.session_state.pending_question = None
     test = st.session_state.typed_test
-    if test and test["message"] != question:
+    if test and test["message"] != question and st.session_state.session_cases.asked_details_on != test["message"]:
         st.session_state.typed_test = None  # an earlier typed test that never reached the model
+        # (kept while the app waits for the details it asked for: the answer is still part of that test)
     blocked = gemini_block_reason() if st.session_state.api_provider == "Google Gemini" else None
     if blocked:
         answer_with_plain_llm(question, offline_reason=blocked)

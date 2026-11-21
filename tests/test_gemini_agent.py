@@ -67,7 +67,7 @@ def test_classifies_a_described_event_then_answers(tools):
 
 def test_follow_up_finds_the_event_from_the_session(tools):
     session = SessionCases()
-    run(tools, [[chunk(call("classify_event", country="Thailand", magnitude_value=120.0, magnitude_scale="Kph"))],
+    run(tools, [[chunk(call("classify_event", country="Thailand", magnitude_value=120.0, magnitude_scale="Kph", start_month=11))],
                 [chunk(types.Part(text="Storm."))]], session=session)
     events, _, _ = run(tools, [[chunk(call("explain_prediction", case_id="EVENT-1", model="Random Forest", target_class="Flood"))],
                                [chunk(types.Part(text="Kph rules out Flood."))]], session=session)
@@ -112,7 +112,7 @@ def test_long_history_is_trimmed_at_a_plain_user_message(tools):
 def test_app_agent_mode_shows_the_event_card_and_scores_it(app):
     with mock.patch("src.llm_tasks.llm_guess", return_value={"predicted_class": "Storm", "confidence": 0.9, "reason": "Kph."}):
         at = app({"GEMINI_API_KEY": "AIzaSyFAKE"})
-        script = [[chunk(call("classify_event", country="Thailand", magnitude_value=120.0, magnitude_scale="Kph",
+        script = [[chunk(call("classify_event", country="Thailand", magnitude_value=120.0, magnitude_scale="Kph", start_month=11,
                               stated_true_type="Storm"))],
                   [chunk(types.Part(text="Storm, as you said."))]]
         with mock.patch("src.agent.make_gemini_client", return_value=FakeClient(script)):

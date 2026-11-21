@@ -125,6 +125,27 @@ def event_from_case(case: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+MEASURE_QUESTION = "what was measured (affected area, wind speed, magnitude, temperature, people vaccinated) or that nothing was"
+
+
+def missing_details(event: Dict[str, Any], nothing_measured: bool = False) -> List[str]:
+    """The details to ask for before predicting, or [] if the event is described well enough.
+
+    Asked when the place or the measured quantity is missing, or both the month and the duration are.
+    "What was measured" matters most: no scale is itself evidence (every Landslide and half the Epidemics
+    in the data have none), so a scale left out by mistake reads as "nothing was measured".
+    nothing_measured: the user said so, which answers the question (the scale really is Unknown)."""
+    where = bool(event.get("country") or event.get("region"))
+    scale = nothing_measured or event.get("magnitude_scale") not in (None, "", "Unknown")
+    month = bool(event.get("start_month"))
+    duration = event.get("duration_days") is not None
+    if where and scale and (month or duration):
+        return []
+    asks = [("where it happened (country)", where), (MEASURE_QUESTION, scale),
+            ("the month it started", month), ("how long it lasted", duration)]
+    return [text for text, given in asks if not given]
+
+
 def filled_attributes(event: Dict[str, Any]) -> List[str]:
     """Attributes the user didn't give: build_features filled them with the training default,
     so the models see a value (e.g. month 1 = January) that nobody actually said."""
@@ -135,7 +156,8 @@ def filled_attributes(event: Dict[str, Any]) -> List[str]:
         "Start month": not (month and 1 <= int(month) <= 12),
         "Event duration": event.get("duration_days") is None,
         "Magnitude scale": not event.get("magnitude_scale"),
-        "Magnitude value": event.get("magnitude_value") is None,
+        # Scale "Unknown" given on purpose means nothing was measured: no value is then the real answer too.
+        "Magnitude value": event.get("magnitude_value") is None and event.get("magnitude_scale") != "Unknown",
     }
     return [name for name, _, _ in RAW_ATTRIBUTES if missing[name]]
 

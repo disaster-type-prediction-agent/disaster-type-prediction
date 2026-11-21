@@ -110,7 +110,7 @@ def route_question(api_key: str, question: str, classes: List[str], countries: L
     if route.get("event"):
         route["event"]["country"] = match_country(route["event"].get("country"), countries)
         if route["event"].get("magnitude_scale") in (None, "Unknown"):  # the reader left it out
-            route["event"]["magnitude_scale"] = scale_from_text(question)
+            route["event"]["magnitude_scale"] = scale_from_text(question)  # None if not named: a flagged default
     return route
 
 
