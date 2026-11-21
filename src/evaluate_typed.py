@@ -67,6 +67,7 @@ def run_case(case, index, key, tools, registry, calls):
     record["message"] = message
 
     session, text, tool_names, error = SessionCases(), "", [], None
+    session.message = message
     for kind, payload in GeminiAuditorAgent(tools, key).run_turn([], message, MODELS, session):
         if kind == "text":
             text += payload
@@ -92,6 +93,12 @@ def run_case(case, index, key, tools, registry, calls):
     record["explanation_ok"] = None if check is None else check["ok"]
     record["explanation_issues"] = check["issues"] if check else []
     return record
+
+
+def drop_results(case_ids):
+    """Remove these cases from the results so the next run redoes them (e.g. after a fix that affects them)."""
+    keep = [line for line in RESULTS.open() if line.strip() and json.loads(line)["case_id"] not in case_ids]
+    RESULTS.write_text("".join(keep))
 
 
 def run(per_class, seed, pause):
@@ -221,5 +228,8 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--pause", type=float, default=6.0, help="seconds between cases (free-tier rate limits)")
     ap.add_argument("--summarize", action="store_true")
+    ap.add_argument("--redo", help="comma-separated case ids to drop from the results and run again")
     args = ap.parse_args()
+    if args.redo:
+        drop_results({c.strip().upper() for c in args.redo.split(",") if c.strip()})
     summarize() if args.summarize else run(args.per_class, args.seed, args.pause)

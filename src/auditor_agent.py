@@ -3,7 +3,8 @@ import json
 from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from src.event_features import MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled
+from src.event_features import (MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled,
+                                scale_from_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -64,6 +65,7 @@ class SessionCases:
     def __init__(self):
         self.cases: Dict[str, Dict[str, Any]] = {}
         self.counter = 0
+        self.message = ""  # the user's latest message as typed (no UI context), for checks done in code
 
     def next_id(self) -> str:
         self.counter += 1
@@ -263,13 +265,21 @@ class AuditorTools:
                 "magnitude_scale": args.get("magnitude_scale"),
             }
             session = session or SessionCases()
+            notes = []
+            if event["magnitude_scale"] in (None, "Unknown"):
+                scale = scale_from_text(session.message)
+                if scale:  # the LLM left it out, but the message names what was measured
+                    event["magnitude_scale"] = scale
+                    notes.append(f"Magnitude scale {scale} was read from the message by the app.")
             case = make_event_case(event, self.registry.feature_names, session.next_id(),
                                    truth=args.get("stated_true_type"), class_names=self.classes)
             session.add(case)
             audit = self.registry.audit_case(case, models)
             result = self._case_payload(audit)
             if args.get("country") and not country:
-                result["note"] = f"Country '{args['country']}' is not one the models know; it was left out."
+                notes.append(f"Country '{args['country']}' is not one the models know; it was left out.")
+            if notes:
+                result["note"] = " ".join(notes)
             return result, f"Classified {case['case_id']} ({country or 'no country'})", audit, models
 
         if name == "find_case":

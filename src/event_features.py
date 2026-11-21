@@ -17,6 +17,7 @@ value in data/processed/disaster_processed_feature_selected.csv exactly.
 """
 import calendar
 import math
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 DURATION_LOG_MAX = 8.098034756176071   # log1p(3,287 days), the longest event in the raw data
@@ -24,6 +25,38 @@ MAGNITUDE_LOG_MAX = 16.38244832185021  # log1p(13,025,874), the largest magnitud
 
 MAGNITUDE_SCALES = ["Km2", "Kph", "Moment Magnitude", "Vaccinated", "°C", "Unknown"]
 REGIONS = ["Africa", "Americas", "Asia", "Europe", "Oceania"]
+
+# Words for WHAT WAS MEASURED (never disaster names), English and Thai. A message can name the quantity
+# without a figure ("temperatures were reported"); the scale alone still tells the models a lot.
+SCALE_WORDS = {
+    "Km2": ["km2", "km²", "sq km", "sq. km", "square kilomet", "square mile", "hectare", "acre", "affected area",
+            "area affected", "area was affected", "burned area", "burnt area", "area burned", "area burnt",
+            "ตร.กม", "ตารางกิโลเมตร", "ตารางไมล์", "เฮกตาร์", "พื้นที่ได้รับผลกระทบ", "พื้นที่ที่ได้รับผลกระทบ",
+            "พื้นที่ประสบภัย", "พื้นที่เสียหาย", "ขนาดพื้นที่"],
+    "Kph": ["km/h", "kph", "kmh", "km per hour", "kilometres per hour", "kilometers per hour", "mph", "miles per hour",
+            "wind speed", "windspeed", "gust", "กม./ชม", "กม/ชม", "กิโลเมตรต่อชั่วโมง", "ความเร็วลม"],
+    "Moment Magnitude": ["magnitude", "richter", "ริกเตอร์", "แมกนิจูด", "แม็กนิจูด", "แมกนิจูด"],
+    "°C": ["°c", "°f", "celsius", "fahrenheit", "degree", "temperature", "องศา", "อุณหภูมิ", "เซลเซียส"],
+    "Vaccinated": ["vaccin", "วัคซีน"],
+}
+
+
+def scale_from_text(text: Optional[str]) -> Optional[str]:
+    """The magnitude scale a message names, or None if it names none or more than one.
+
+    A safety net for the LLM reader, which sometimes leaves the scale empty when no figure is given."""
+    low = (text or "").lower()
+    found = [scale for scale, pattern in _SCALE_PATTERNS.items() if pattern.search(low)]
+    return found[0] if len(found) == 1 else None
+
+
+# English words must start a word ("gust" is not in "August", "acre" not in "massacre"); a word may go on
+# ("vaccin" -> vaccination, "degree" -> degrees). Thai has no spaces between words, so it matches anywhere.
+_SCALE_PATTERNS = {
+    scale: re.compile("|".join((r"(?<![a-z])" if w[0].isascii() and w[0].isalpha() else "") + re.escape(w)
+                               for w in words))
+    for scale, words in SCALE_WORDS.items()
+}
 
 # (attribute, its feature columns: exact names, or prefixes ending in "_", encoding)
 RAW_ATTRIBUTES = [

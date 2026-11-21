@@ -856,6 +856,7 @@ def answer_with_agent(question):
         cards_box = st.container()
         answer_ph = st.empty()
 
+        st.session_state.session_cases.message = question  # as typed: code-side checks read this, not the UI context
         for kind, payload in agent.run_turn(
             history, f"{ui_context()}\n\n{question}\n\n{language_note(question)}", active_models(),
             st.session_state.session_cases

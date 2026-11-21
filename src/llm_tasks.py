@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from src.agent import gemini_models, make_gemini_client
-from src.event_features import MAGNITUDE_SCALES, REGIONS, describe_event
+from src.event_features import MAGNITUDE_SCALES, REGIONS, describe_event, scale_from_text
 
 
 @lru_cache(maxsize=4)
@@ -109,6 +109,8 @@ def route_question(api_key: str, question: str, classes: List[str], countries: L
     route = result.model_dump()
     if route.get("event"):
         route["event"]["country"] = match_country(route["event"].get("country"), countries)
+        if route["event"].get("magnitude_scale") in (None, "Unknown"):  # the reader left it out
+            route["event"]["magnitude_scale"] = scale_from_text(question)
     return route
 
 
@@ -139,7 +141,8 @@ DISASTER_WORDS = ["drought", "earthquake", "epidemic", "heat wave", "heatwave", 
                   "ภัยแล้ง", "แผ่นดินไหว", "โรคระบาด", "คลื่นความร้อน", "น้ำท่วม", "อุทกภัย", "ดินถล่ม", "พายุ", "ไต้ฝุ่น", "ไฟป่า"]
 
 
-MEASURED_AS = {"Km2": "the affected area (km²)", "Kph": "the wind speed (km/h)", "Moment Magnitude": "the magnitude",
+MEASURED_AS = {"Km2": "the affected area (km²)", "Kph": "the wind speed (km/h)",
+               "Moment Magnitude": "the magnitude (on the moment magnitude scale)",
                "°C": "the temperature (°C)", "Vaccinated": "the number of people vaccinated"}
 
 
@@ -148,8 +151,16 @@ def _unmeasured_hint(event: Dict[str, Any]) -> str:
     scale = event.get("magnitude_scale")
     if event.get("magnitude_value") is None and scale in MEASURED_AS:
         return (f"\n- Size: what was measured is {MEASURED_AS[scale]}, but no figure was recorded. "
-                "Say that this was measured or reported without giving a number.")
+                "Name that quantity in the message (e.g. 'the affected area was reported' or 'temperatures were "
+                "recorded') without giving a number; don't just say 'it was measured'.")
     return ""
+
+
+def _carries_scale(event: Dict[str, Any], message: str) -> bool:
+    """A case measured without a figure must name the quantity, or the reader can't recover the scale."""
+    if event.get("magnitude_value") is not None or event.get("magnitude_scale") not in MEASURED_AS:
+        return True
+    return scale_from_text(message) == event["magnitude_scale"]
 
 
 def write_scenario(api_key: str, event: Dict[str, Any], language: str = "Thai") -> Optional[str]:
@@ -166,8 +177,9 @@ def write_scenario(api_key: str, event: Dict[str, Any], language: str = "Thai") 
         f"{describe_event(event)}"
         + _unmeasured_hint(event)
     )
-    for _ in range(2):  # one retry if the message names a hazard anyway
+    for _ in range(3):  # retry if the message names a hazard, or drops the quantity measured without a figure
         result = _generate_json(api_key, prompt, _Scenario, temperature=0.9)  # varied wording, like real users
-        if result and result.message.strip() and not any(w in result.message.lower() for w in DISASTER_WORDS):
+        if result and result.message.strip() and not any(w in result.message.lower() for w in DISASTER_WORDS) \
+                and _carries_scale(event, result.message):
             return result.message.strip()
     return None
