@@ -26,6 +26,13 @@ CONFIDENCE_LEVEL = re.compile(
     re.IGNORECASE,
 )
 NUMBER = re.compile(r"\d+(?:\.\d+)?")
+# A bound (">97%", "over 99%", "มากกว่า 96%") summarises the figures instead of quoting one: it is right when
+# a model figure lies on the stated side of it ("all three above 97%" with 97.7, 99.9, 99.9).
+_NUM = r"(\d+(?:[.,]\d+)?)\s*%"
+LOWER_BOUND = re.compile(r"(?:>=?|≥|\b(?:over|above|more than|at least|greater than|exceeding)\s+|มากกว่า\s*|เกิน\s*|สูงกว่า\s*)" + _NUM,
+                         re.IGNORECASE)
+UPPER_BOUND = re.compile(r"(?:<=?|≤|\b(?:under|below|less than|at most)\s+|น้อยกว่า\s*|ต่ำกว่า\s*|ไม่ถึง\s*)" + _NUM,
+                         re.IGNORECASE)
 TOLERANCE = 0.6  # percentage points: covers rounding 88.8 -> 89
 
 
@@ -80,10 +87,20 @@ def check_answer(text: str, audits: Iterable[Dict[str, Any]], sources: Iterable[
         numbers_in(a["case"].get("summary"), allowed)
         numbers_in(a["case"].get("event"), allowed)
     numbers_in(sources, allowed)
-    quoted = {float(p.replace(",", ".")) for p in PERCENT.findall(CONFIDENCE_LEVEL.sub(" ", text))}
+    body = CONFIDENCE_LEVEL.sub(" ", text)
+    percents = {n for n in allowed if n <= 100}
+    wrong_bounds = sorted(
+        [f">{p:g}%" for p in (float(x.replace(",", ".")) for x in LOWER_BOUND.findall(body))
+         if not any(n >= p - TOLERANCE for n in percents)]
+        + [f"<{p:g}%" for p in (float(x.replace(",", ".")) for x in UPPER_BOUND.findall(body))
+           if not any(n <= p + TOLERANCE for n in percents)])
+    if wrong_bounds:
+        issues.append("states " + ", ".join(wrong_bounds) + ", which no model figure matches")
+    body = UPPER_BOUND.sub(" ", LOWER_BOUND.sub(" ", body))
+    quoted = {float(p.replace(",", ".")) for p in PERCENT.findall(body)}
     unknown = sorted(p for p in quoted if not any(abs(p - n) <= TOLERANCE for n in allowed))
     if unknown:
         issues.append("quotes " + ", ".join(f"{p:g}%" for p in unknown) + " not found in the model output")
-    if not audits and not quoted:
+    if not audits and not quoted and not wrong_bounds:
         return None  # no case and no figures: nothing the model said to compare against
     return {"ok": not issues, "issues": issues}

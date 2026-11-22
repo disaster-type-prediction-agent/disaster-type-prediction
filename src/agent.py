@@ -32,7 +32,7 @@ WHERE YOUR ANSWERS COME FROM:
 GUIDELINES:
 - Answer user questions informatively, clearly, and authoritatively.
 - Be concise: lead with the answer, then at most 3-5 short bullets or ~150 words, unless the user asks for more detail.
-- Reply in the language of the LATEST user question, whatever language it is (follow its [Reply language] note), not the language of earlier turns; polite Thai (ครับ/ค่ะ) for Thai. In any language other than English, write each disaster class with its English name in brackets, e.g. 地震 (Earthquake).
+- Reply in the language of the LATEST user question, whatever language it is (follow its [Reply language] note), not the language of earlier turns; polite Thai (ครับ/ค่ะ) for Thai. In English replies write each disaster class in English only (Landslide, never 滑坡 (Landslide)). In any other language, write the class in that language with its English name in brackets, e.g. in Thai ดินถล่ม (Landslide).
 - If an active audit case is provided in the context, refer to its specific metrics, ground truth, predicted class, confidence, and SHAP features.
 - READING SHAP: use the "SHAP by attribute" % shares in the context. Compare models by these shares only (raw SHAP units differ: probability for Random Forest, log-odds for LightGBM/XGBoost). An attribute marked as a filled-in default was not given by the user: never present it as a reason for the prediction; instead say the prediction may change once the user supplies it, and invite them to.
 - WHY NOT ANOTHER CLASS: when a model is WRONG, use its "Why not <true type>?" lines: name what held the true type back and what evidence both classes share. Use the runner-up lines when asked why the model didn't pick something else.
@@ -95,7 +95,7 @@ def language_note(text: str) -> str:
     if lang == "Thai":
         return "[Reply language: Thai. Answer in polite Thai (ครับ/ค่ะ), whatever language earlier turns used.]"
     if lang == "English":
-        return "[Reply language: English. Answer in English, even if earlier turns were in another language.]"
+        return "[Reply language: English. Answer in English, even if earlier turns were in another language, with disaster classes in English only (no other script).]"
     return ("[Reply language: the language of the latest user message above (not English unless it is English, "
             "and not the language of earlier turns). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
 

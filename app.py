@@ -12,7 +12,7 @@ from sklearn.metrics import f1_score
 # Keys in a local .env file become environment variables (already-set variables win).
 load_dotenv()
 
-from src.agent import RESTART, DisasterAuditorLLM, language_note, set_usage_hook
+from src.agent import RESTART, DisasterAuditorLLM, language_note, reply_language, set_usage_hook
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
 from src.llm_tasks import llm_guess, route_question, write_scenario
@@ -937,6 +937,20 @@ def keyword_route(question):
     }
 
 
+def busy_reply(question, reason):
+    """The answer when Gemini can't be used and nothing ran: say so plainly, in the message's language.
+
+    Reading a described event takes Gemini, so the models have not run on it. The built-in summary would
+    greet the user or describe an older case instead, which reads as if the message had been ignored."""
+    if reply_language(question) == "Thai":
+        return (f":orange[:material/hourglass_empty:] {reason} การอ่านเหตุการณ์ที่พิมพ์มาต้องใช้ Gemini "
+                "จึงยังไม่ได้รันโมเดลกับข้อความนี้ครับ ลองส่งใหม่อีกครั้งในอีกสักครู่ หรือใส่ Gemini key ของคุณเอง "
+                "(ฟรี) ใน Settings ระหว่างนี้ปุ่มด้านบน เช่น *Random case* หรือ *Hard case* ใช้ได้โดยไม่ต้องใช้ Gemini")
+    return (f":orange[:material/hourglass_empty:] {reason}. Reading a described event needs Gemini, so the models "
+            "haven't run on this message yet. Send it again in a moment, or add your own free Gemini key in "
+            "Settings. Meanwhile the buttons above (*Random case*, *Hard case*, ...) work without Gemini.")
+
+
 def audit_for_route(route):
     """Run whatever the question asked for: a test-bank case, or the models on the user's own event."""
     models_to_test = active_models()
@@ -1004,10 +1018,14 @@ def answer_with_plain_llm(question, offline_reason=None):
     llm = DisasterAuditorLLM(provider=prov_code, api_key=api_key)
     with st.chat_message("assistant", avatar=APP_ICON):
         reply, answer_ph = "", st.empty()
-        if offline_reason:
+        if offline_reason and not result:
+            reply = busy_reply(question, offline_reason)
+            answer_ph.markdown(reply)
+        elif offline_reason:
             reply = (f":orange[:material/hourglass_empty:] {offline_reason}, so this answer uses the built-in summary "
                      "(the ML models still ran). Add your own free Gemini key in Settings to keep chatting.\n\n")
-        stream = (llm.local_answer(question, st.session_state.last_audit) if offline_reason
+        stream = ([] if offline_reason and not result
+                  else llm.local_answer(question, st.session_state.last_audit) if offline_reason
                   else llm.chat_stream(user_message=question, history=history, current_case=st.session_state.last_audit))
         for piece in stream:
             # RESTART: the model failed mid-answer and a fallback model is starting over.
@@ -1017,7 +1035,8 @@ def answer_with_plain_llm(question, offline_reason=None):
              if prov_code == "gemini" and gemini_key and result else None)
     st.session_state.messages.append({
         "role": "assistant", "content": reply,
-        "sources": ("Answered by the app's built-in summary (Gemini limit reached)." if offline_reason
+        "sources": ("Gemini limit reached: nothing was run on this message." if offline_reason and not result
+                    else "Answered by the app's built-in summary (Gemini limit reached)." if offline_reason
                     else answer_sources(st.session_state.last_audit, prov_code)),
         "check": check,
     })

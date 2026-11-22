@@ -96,3 +96,16 @@ def test_counted_client_keeps_the_real_client_alive():
     ref = weakref.ref(client._client)
     gc.collect()
     assert ref() is not None
+
+
+def test_a_described_event_over_the_limit_says_nothing_ran(app):
+    """Without Gemini a typed event can't be read: say so, instead of a greeting or an older case's summary."""
+    at = app({"GEMINI_API_KEY": SHARED})
+    at.session_state["gemini_calls"] = 40
+    with mock.patch("src.agent._make_raw_client", side_effect=AssertionError("Gemini must not be called")):
+        last = ask(at, "In the Philippines, wind speed was recorded in November over 2 days.")
+    assert "haven't run on this message" in last["content"] and "Hello" not in last["content"]
+    assert "nothing was run" in last["sources"] and not at.session_state["stats"]["records"]
+    with mock.patch("src.agent._make_raw_client", side_effect=AssertionError("Gemini must not be called")):
+        last = ask(at, "เกิดน้ำท่วมที่เชียงใหม่เดือนกันยายน")
+    assert "ยังไม่ได้รันโมเดล" in last["content"]

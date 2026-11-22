@@ -59,3 +59,13 @@ def test_metrics_only_answer_is_checked_on_figures(registry):
 
 def test_thai_class_names_count():
     assert mentions_class("น่าจะเป็นอุทกภัย", "Flood") and mentions_class("ไฟป่า", "Wildfire")
+
+
+def test_a_true_bound_passes_and_a_false_one_is_flagged(audit):
+    conf = audit["models"]["Random Forest"]["prediction"]["confidence"] * 100
+    below = int(conf) - 1
+    assert check_answer(f"Storm, with over {below}% confidence.", [audit])["ok"]
+    assert check_answer(f"Storm (>{below}%).", [audit])["ok"]
+    assert check_answer(f"พายุ ด้วยความมั่นใจมากกว่า {below}%", [audit])["ok"]
+    result = check_answer("Storm, with more than 101% confidence.", [audit])
+    assert not result["ok"] and ">101%" in result["issues"][0]
