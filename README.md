@@ -119,7 +119,7 @@ docker build -t disaster-model-auditor .
 docker run -p 8501:8501 disaster-model-auditor
 ```
 
-### 3. Evaluate the typed path (optional, uses ~250 Gemini requests)
+### 3. Evaluate the typed path (optional, uses ~400 Gemini requests)
 
 Measures how well the system classifies events that people *type*: Gemini rewrites 10 held-out test cases per class as chat messages without their type, the Gemini agent reads each one back and calls the ML models, and the results are compared with the same cases' recorded features. Resumable; the report goes to `reports/typed_eval/summary.md`.
 ```bash
@@ -151,7 +151,7 @@ pytest
 
 ## ⚠️ Known Limitations & Future Work
 
-- **Typed messages cost little accuracy** (`reports/typed_eval/summary.md`, 80 cases): Random Forest 91.2% direct → 88.8% typed, LightGBM 93.8% → 95.0%, XGBoost 90.0% → 88.8%. Gemini reads 97.3% of attributes correctly. A message that names a measure without a figure ("temperatures were reported") used to leave the magnitude scale empty and caused most typed errors; the app now reads the scale from the message's own words when the LLM leaves it out (`scale_from_text`), and the remaining misses are country names (e.g. Cape Verde in Thai) and very short events. The evaluation before this fix is kept in `results_before_scale_fix.jsonl` (Random Forest 86.2%, LightGBM 88.8%, XGBoost 82.5% typed).
-- **Missing attributes are filled with training defaults** (month → January, duration → 0 days) when the user doesn't know them, even after the app asks. The app flags them, but a prediction built mostly from defaults says more about the defaults than the event. The typed evaluation above predates the follow-up question; its cases without a measurement (Landslides, many Epidemics) would now be asked first.
+- **Typed messages cost little accuracy** (`reports/typed_eval/summary.md`, 80 cases, with the follow-up question): Random Forest 91.2% direct → 88.8% typed, LightGBM 93.8% → 92.5%, XGBoost 90.0% → 87.5%. Gemini reads 97.5% of attributes correctly (magnitude scale 99%); the app asked for more details in 21 of 80 cases. A message that names a measure without a figure ("wind speed was recorded, no number") gives the scale, not "nothing measured": the scale read from the message (`scale_from_text`) wins over the LLM's `nothing_measured` flag. Before that rule, Gemini often passed `nothing_measured` for such messages and typed accuracy fell to 76.2% (Random Forest), with most errors predicted as Landslide (`results_nothing_measured_bug.jsonl`). The remaining misses are country names (e.g. Hong Kong in Thai) and a magnitude written without its unit. Earlier runs: `results_before_follow_up.jsonl` (88.8% / 95.0% / 88.8%) and `results_before_scale_fix.jsonl` (86.2% / 88.8% / 82.5%).
+- **Missing attributes are filled with training defaults** (month → January, duration → 0 days) when the user doesn't know them, even after the app asks. The app flags them, but a prediction built mostly from defaults says more about the defaults than the event. In the typed evaluation the user answers the question with "I don't know any other details", so its figures are the worst case for the follow-up.
 - **Drought, Flood and Wildfire share the Km2 magnitude scale**, so the models separate them mainly by duration, month and place. This comes from the EM-DAT data, not the code; extra pre-event attributes (rainfall, temperature anomaly) would help.
 - **Shared Gemini key on the free tier:** each session gets 40 requests and the app 400 per day, after which built-in summaries replace Gemini's answers. A personal key can be pasted in the sidebar.

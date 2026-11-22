@@ -45,10 +45,14 @@ def scale_from_text(text: Optional[str]) -> Optional[str]:
     """The magnitude scale a message names, or None if it names none or more than one.
 
     A safety net for the LLM reader, which sometimes leaves the scale empty when no figure is given."""
-    low = (text or "").lower()
+    # "unknown magnitude" names no quantity: "magnitude" there is just "size", not the Richter/moment scale.
+    low = _NO_MAGNITUDE.sub(" ", (text or "").lower())
     found = [scale for scale, pattern in _SCALE_PATTERNS.items() if pattern.search(low)]
     return found[0] if len(found) == 1 else None
 
+
+_NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
+                           r"|\bmagnitude (?:was |is )?(?:unknown|not (?:recorded|given|known|reported))\b")
 
 # English words must start a word ("gust" is not in "August", "acre" not in "massacre"); a word may go on
 # ("vaccin" -> vaccination, "degree" -> degrees). Thai has no spaces between words, so it matches anywhere.

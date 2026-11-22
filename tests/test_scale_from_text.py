@@ -87,3 +87,10 @@ def test_writer_must_name_the_quantity_when_no_figure_was_recorded():
     with mock.patch("src.llm_tasks._generate_json", side_effect=[vague, named]) as gen:
         assert llm_tasks.write_scenario("k", event, "English") == named.message
     assert gen.call_count == 2
+
+
+def test_unknown_magnitude_names_no_scale():
+    from src.event_features import scale_from_text
+    assert scale_from_text("an intense event struck with unknown magnitude") is None
+    assert scale_from_text("the magnitude was not recorded") is None
+    assert scale_from_text("a magnitude 6.1 earthquake") == "Moment Magnitude"

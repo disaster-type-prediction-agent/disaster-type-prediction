@@ -110,3 +110,33 @@ def test_typed_test_survives_the_question_and_is_scored(app, registry):
     assert not at.exception, at.exception
     [rec] = at.session_state["stats"]["records"]
     assert rec["source"] == "Typed test" and rec["true_type"] == "Landslide"
+
+
+def test_a_named_quantity_beats_nothing_measured(tools):
+    """Typed eval: Gemini read 'wind speed was recorded, no figure' as nothing_measured; the scale must win."""
+    msg = "In the Philippines, wind speed was recorded this November for 2 days, but no figure was given."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, country="Philippines", start_month=11,
+                                   duration_days=2, nothing_measured=True)
+    assert audit and audit["case"]["summary"]["magnitude_scale"] == "Kph"
+
+    # The LLM naming the scale itself also beats the flag.
+    result, _, audit, _ = classify(tools, SessionCases(), "storm, winds measured, no number", country="Philippines",
+                                   start_month=11, duration_days=2, magnitude_scale="Kph", nothing_measured=True)
+    assert audit and audit["case"]["summary"]["magnitude_scale"] == "Kph"
+
+
+def test_nothing_measured_still_counts_when_no_quantity_is_named(tools):
+    msg = "A slope collapsed in Peru in March for 1 day; nothing was measured."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, country="Peru", start_month=3, duration_days=1,
+                                   nothing_measured=True)
+    assert audit and audit["case"]["summary"]["magnitude_scale"] == "Unknown"
+
+
+def test_the_answer_turn_still_reads_the_scale_from_the_first_message(tools):
+    session = SessionCases()
+    first = "In Liberia, the affected area was reported, no figure."
+    result, _, audit, _ = classify(tools, session, first, country="Liberia")
+    assert result["status"] == "need_more_details"
+    result, _, audit, _ = classify(tools, session, "I don't know any other details; that's all I have.",
+                                   country="Liberia", nothing_measured=True)
+    assert audit and audit["case"]["summary"]["magnitude_scale"] == "Km2"

@@ -148,8 +148,9 @@ class AuditorTools:
                                             "description": "Wind speed in kph, area in km2, Richter/moment magnitude, temperature °C, or people vaccinated."},
                         "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "What was measured, even when no figure is given (e.g. 'affected area was reported' -> Km2): area Km2, wind speed Kph, Richter/moment magnitude, temperature °C, people vaccinated."},
                         "nothing_measured": {"type": "boolean", "description": (
-                            "Only if the user said no size or measurement was recorded for the event (not just that "
-                            "they don't know). Leave magnitude_scale and magnitude_value out then.")},
+                            "Only if the user said nothing at all was measured for the event (not just that they "
+                            "don't know). If they name what was measured but give no figure ('wind speed was "
+                            "recorded, no number'), that is magnitude_scale (Kph), not nothing_measured.")},
                         "stated_true_type": {"type": "string", "enum": self.classes,
                                              "description": "Only if the user says what the event actually was."},
                         "models": models_param,
@@ -274,14 +275,21 @@ class AuditorTools:
             session = session or SessionCases()
             notes = []
             nothing_measured = bool(args.get("nothing_measured")) and args.get("magnitude_value") is None
-            if nothing_measured:
-                event["magnitude_scale"] = "Unknown"  # a real answer, like the recorded cases with no measurement
-            elif event["magnitude_scale"] in (None, "Unknown"):
-                event["magnitude_scale"] = None  # not said: a filled-in default, flagged as such
-                scale = scale_from_text(session.message)
-                if scale:  # the LLM left it out, but the message names what was measured
+            if event["magnitude_scale"] in (None, "Unknown"):
+                event["magnitude_scale"] = None
+                # Read the event's own words: on the answer to our question, the message that described it too.
+                text = session.message
+                if session.asked_details_on and session.asked_details_on != session.message:
+                    text = f"{session.asked_details_on}\n{session.message}"
+                scale = scale_from_text(text)
+                if scale:
+                    # The message names what was measured. "Wind speed was recorded, no figure" is a scale with no
+                    # value, not "nothing measured", whatever the LLM passed: the more specific evidence wins.
                     event["magnitude_scale"] = scale
                     notes.append(f"Magnitude scale {scale} was read from the message by the app.")
+                elif nothing_measured:
+                    event["magnitude_scale"] = "Unknown"  # a real answer, like the recorded cases with no measurement
+            nothing_measured = nothing_measured and event["magnitude_scale"] == "Unknown"
             missing = missing_details(event, nothing_measured)
             answered = session.asked_details_on is not None and session.asked_details_on != session.message
             if missing and not answered:
