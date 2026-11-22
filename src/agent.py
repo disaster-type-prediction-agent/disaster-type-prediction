@@ -100,6 +100,17 @@ def language_note(text: str) -> str:
             "and not the language of earlier turns). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
 
 
+
+def agent_turn_text(question: str, context_parts) -> str:
+    """The text the tool-using agent gets for one user turn, the same in the app and the typed evaluation.
+
+    The UI context is labelled as app state and the user's words follow a "User message:" label. Run
+    together ("[UI context] selected models: Random Forest" then the message), Gemini dropped the country
+    from "In the Philippines, ..." in 3 of 3 tries; labelled, it passed every stated value."""
+    context = "; ".join(p for p in context_parts if p)
+    head = f"[UI context, app state, not the user's words: {context}]\n\n" if context else ""
+    return f"{head}User message:\n{question}\n\n{language_note(question)}"
+
 # Usage hook: the app sets one per script run (thread-local, so sessions don't mix) to count calls
 # against its quota guard. Called with "call" for every request and "quota" when Gemini answers 429.
 _usage = threading.local()

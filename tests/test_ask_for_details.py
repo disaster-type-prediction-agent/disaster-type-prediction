@@ -140,3 +140,34 @@ def test_the_answer_turn_still_reads_the_scale_from_the_first_message(tools):
     result, _, audit, _ = classify(tools, session, "I don't know any other details; that's all I have.",
                                    country="Liberia", nothing_measured=True)
     assert audit and audit["case"]["summary"]["magnitude_scale"] == "Km2"
+
+
+def test_country_and_duration_read_from_the_message(tools):
+    from src.event_features import country_from_text, duration_from_text
+    c = tools.countries
+    assert country_from_text("In the Philippines, wind speed was recorded.", c) == "Philippines"
+    assert country_from_text("A flood in the Democratic Republic of the Congo", c) == "Democratic Republic of the Congo"
+    assert country_from_text("Storm in Papua New Guinea", c) == "Papua New Guinea"
+    assert country_from_text("Heat in Iran and Iraq", c) is None          # two countries: the LLM decides
+    assert country_from_text("wind was recorded by us", c) is None         # no ambiguous "us"
+    assert country_from_text("An event in Vietnam", c) == "Viet Nam"
+    assert duration_from_text("recorded in November over 2 days") == 2
+    assert duration_from_text("lasted 3 weeks") == 21
+    assert duration_from_text("นาน 2 วัน") == 2
+    assert duration_from_text("12 hours") == 0.5
+    assert duration_from_text("in November, magnitude 6.1") is None
+    assert duration_from_text("2 days of rain then 5 days of floods") is None
+
+
+def test_the_app_fills_a_country_and_duration_the_llm_left_out(tools):
+    msg = "In the Philippines, wind speed was recorded in November over 2 days, but no figure was given."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, start_month=11, magnitude_scale="Kph")
+    event = audit["case"]["event"]
+    assert event["country"] == "Philippines" and event["duration_days"] == 2
+    assert audit["case"]["summary"]["region"] == "Asia"
+
+
+def test_a_named_country_beats_a_region_alone(tools):
+    msg = "In the Philippines, wind speed was recorded in November over 2 days."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, region="Asia", start_month=11, magnitude_scale="Kph")
+    assert audit["case"]["event"]["country"] == "Philippines"

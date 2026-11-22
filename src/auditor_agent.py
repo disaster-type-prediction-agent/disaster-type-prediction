@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled,
-                                missing_details, scale_from_text)
+                                missing_details, scale_from_text, country_from_text, duration_from_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -27,7 +27,7 @@ How to work:
 - Anything not from a tool (disaster science, history) is general knowledge: say so briefly.
 - For "which model is better" questions, combine get_model_metrics with get_significance; differences inside the McNemar noise band are not real wins.
 - Ground explanations in disaster physics and seasonality (monsoon floods vs. storms, magnitude scales that only exist for some hazards, event duration patterns).
-- Each user message may start with a [UI context] line describing the case open on screen and the selected models. Treat it as background, not as the question.
+- Each user turn may start with a [UI context, app state, ...] line describing the case open on screen and the selected models; the user's own words follow "User message:". Treat the context as background, not as the question, and read event details only from the user's words.
 - Reply in the language of the user's LATEST message, whatever language it is, as its [Reply language] note says, not the language of earlier turns (polite ครับ/ค่ะ in Thai). In English replies write each disaster class in English only (Landslide, never 滑坡 (Landslide)). In any other language, write the class in that language with its English name in brackets, e.g. in Thai ดินถล่ม (Landslide). Be concise and use short markdown.
 - Stay on disaster classification, these models and their evaluation. Politely decline unrelated requests."""
 
@@ -275,12 +275,24 @@ class AuditorTools:
             session = session or SessionCases()
             notes = []
             nothing_measured = bool(args.get("nothing_measured")) and args.get("magnitude_value") is None
+            # The event's own words: on the answer to our question, the message that described it too.
+            text = session.message
+            if session.asked_details_on and session.asked_details_on != session.message:
+                text = f"{session.asked_details_on}\n{session.message}"
+            # Safety nets for values the LLM sometimes leaves out although the message states them (in the
+            # app, "In the Philippines, ..." came back without a country; "over 2 days" without a duration).
+            if not event["country"]:  # a region alone is less: the country named in the message wins
+                found = country_from_text(text, self.countries)
+                if found:
+                    event["country"], event["region"] = found, self.country_regions.get(found)
+                    notes.append(f"Country {found} was read from the message by the app.")
+            if event["duration_days"] is None:
+                days = duration_from_text(text)
+                if days is not None:
+                    event["duration_days"] = days
+                    notes.append(f"Duration {days:g} days was read from the message by the app.")
             if event["magnitude_scale"] in (None, "Unknown"):
                 event["magnitude_scale"] = None
-                # Read the event's own words: on the answer to our question, the message that described it too.
-                text = session.message
-                if session.asked_details_on and session.asked_details_on != session.message:
-                    text = f"{session.asked_details_on}\n{session.message}"
                 scale = scale_from_text(text)
                 if scale:
                     # The message names what was measured. "Wind speed was recorded, no figure" is a scale with no

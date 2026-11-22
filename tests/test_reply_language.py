@@ -46,3 +46,28 @@ def test_agent_question_carries_the_note_after_thai_turns(app):
 def test_other_languages_answer_in_kind_with_english_class_names():
     note = language_note("日本で地震がありました")
     assert "language of the latest user message" in note and "(Earthquake)" in note
+
+
+def test_agent_turn_labels_the_ui_context_apart_from_the_users_words():
+    """Run together, Gemini read "selected models: Random Forest" into the message and dropped its country."""
+    from src.agent import agent_turn_text
+    text = agent_turn_text("In the Philippines, wind speed was recorded.", ["selected models: Random Forest"])
+    head, rest = text.split("\n\nUser message:\n", 1)
+    assert head == "[UI context, app state, not the user's words: selected models: Random Forest]"
+    assert rest.startswith("In the Philippines, wind speed was recorded.\n\n[Reply language: English.")
+    assert agent_turn_text("hi", []).startswith("User message:\nhi")
+
+
+def test_the_app_sends_the_labelled_turn(app):
+    from types import SimpleNamespace
+    from unittest import mock
+    from google.genai import types
+    from tests.test_gemini_agent import FakeClient, chunk
+
+    at = app({"GEMINI_API_KEY": "AIzaSyTEST"})
+    fake = FakeClient([[chunk(types.Part(text="Which month did it start?"))]])
+    with mock.patch("src.agent._make_raw_client", return_value=SimpleNamespace(models=fake)):
+        at.chat_input[0].set_value("In the Philippines, wind speed was recorded.").run()
+    sent = fake.requests[0][1][-1].parts[0].text
+    assert sent.startswith("[UI context, app state, not the user's words: selected models:")
+    assert "\n\nUser message:\nIn the Philippines, wind speed was recorded.\n\n[Reply language" in sent

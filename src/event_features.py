@@ -51,6 +51,56 @@ def scale_from_text(text: Optional[str]) -> Optional[str]:
     return found[0] if len(found) == 1 else None
 
 
+
+# Common short names the models' country list spells differently. Ambiguous ones ("us", "korea") are left out.
+COUNTRY_ALIASES = {"usa": "United States of America", "united states": "United States of America",
+                   "uk": "United Kingdom of Great Britain and Northern Ireland",
+                   "united kingdom": "United Kingdom of Great Britain and Northern Ireland",
+                   "britain": "United Kingdom of Great Britain and Northern Ireland", "russia": "Russian Federation",
+                   "vietnam": "Viet Nam", "south korea": "Republic of Korea",
+                   "north korea": "Democratic People's Republic of Korea", "laos": "Lao People's Democratic Republic",
+                   "syria": "Syrian Arab Republic", "tanzania": "United Republic of Tanzania", "turkey": "Türkiye",
+                   "hong kong": "China, Hong Kong Special Administrative Region", "dr congo": "Democratic Republic of the Congo"}
+
+
+def country_from_text(text: Optional[str], countries: List[str]) -> Optional[str]:
+    """The one country an English message names, or None (none, several, or not in the models' list).
+
+    A safety net for the LLM reader. Longer names are matched first and taken out of the text, so "Congo"
+    inside "Democratic Republic of the Congo" or "Guinea" inside "Papua New Guinea" is not counted again."""
+    low = (text or "").lower()
+    names = {}
+    for c in countries:
+        names[c.lower()] = c
+        short = c.split(" (")[0].lower()  # "Iran (Islamic Republic of)" -> "iran"
+        names.setdefault(short, c)
+    for alias, c in COUNTRY_ALIASES.items():
+        if c in countries:
+            names.setdefault(alias, c)
+    found = set()
+    for name in sorted(names, key=len, reverse=True):
+        pattern = r"(?<![a-z])" + re.escape(name) + r"(?![a-z])"
+        if re.search(pattern, low):
+            found.add(names[name])
+            low = re.sub(pattern, " ", low)
+    return found.pop() if len(found) == 1 else None
+
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*-?\s*(hours?|hrs?|days?|weeks?|months?|ชั่วโมง|วัน|สัปดาห์|อาทิตย์|เดือน)(?![a-z])")
+_DAYS_PER = {"hour": 1 / 24, "hr": 1 / 24, "day": 1, "week": 7, "month": 30,
+             "ชั่วโมง": 1 / 24, "วัน": 1, "สัปดาห์": 7, "อาทิตย์": 7, "เดือน": 30}
+
+
+def duration_from_text(text: Optional[str]) -> Optional[float]:
+    """How long the event lasted, in days, when the message gives exactly one length ("over 2 days", "3 สัปดาห์").
+
+    None when it gives none or several (which one is the duration is then the LLM's call, not ours)."""
+    found = {(float(n), unit.rstrip("s") if unit.isascii() else unit) for n, unit in _DURATION.findall((text or "").lower())}
+    if len(found) != 1:
+        return None
+    n, unit = found.pop()
+    return round(n * _DAYS_PER[unit], 2)
+
 _NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
                            r"|\bmagnitude (?:was |is )?(?:unknown|not (?:recorded|given|known|reported))\b")
 

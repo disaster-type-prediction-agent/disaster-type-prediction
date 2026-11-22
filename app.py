@@ -12,7 +12,7 @@ from sklearn.metrics import f1_score
 # Keys in a local .env file become environment variables (already-set variables win).
 load_dotenv()
 
-from src.agent import RESTART, DisasterAuditorLLM, language_note, reply_language, set_usage_hook
+from src.agent import RESTART, DisasterAuditorLLM, agent_turn_text, reply_language, set_usage_hook
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
 from src.llm_tasks import llm_guess, route_question, write_scenario
@@ -834,7 +834,7 @@ def ui_context():
             f"{s_['country']}, {s_['region']}, month {s_['start_month']})"
         )
     parts.append(f"selected models: {', '.join(active_models())}")
-    return "[UI context] " + "; ".join(parts)
+    return parts
 
 
 def steps_label(steps):
@@ -868,7 +868,7 @@ def answer_with_agent(question):
 
         st.session_state.session_cases.message = question  # as typed: code-side checks read this, not the UI context
         for kind, payload in agent.run_turn(
-            history, f"{ui_context()}\n\n{question}\n\n{language_note(question)}", active_models(),
+            history, agent_turn_text(question, ui_context()), active_models(),
             st.session_state.session_cases
         ):
             if kind == "text":

@@ -50,7 +50,7 @@ def sample_cases(registry, per_class, seed):
 
 def run_case(case, index, key, tools, registry, calls):
     from src.answer_check import check_answer
-    from src.agent import language_note
+    from src.agent import agent_turn_text
     from src.auditor_agent import GeminiAuditorAgent, SessionCases
     from src.event_features import compare_events, event_from_case
     from src.llm_tasks import write_scenario
@@ -75,8 +75,9 @@ def run_case(case, index, key, tools, registry, calls):
         nonlocal error
         session.message = user_text
         text = ""
-        # As the app sends it (app.py): the message plus its per-turn reply-language note.
-        for kind, payload in agent.run_turn(history, f"{user_text}\n\n{language_note(user_text)}", MODELS, session):
+        # Exactly as the app sends it (agent_turn_text), with all three models selected.
+        for kind, payload in agent.run_turn(history, agent_turn_text(user_text, [f"selected models: {', '.join(MODELS)}"]),
+                                            MODELS, session):
             if kind == "text":
                 text += payload
             elif kind == "retract":
