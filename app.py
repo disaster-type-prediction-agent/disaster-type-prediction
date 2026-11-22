@@ -14,7 +14,7 @@ load_dotenv()
 
 from src.agent import RESTART, DisasterAuditorLLM, agent_turn_text, reply_language, set_usage_hook
 from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
-from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
+from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events, type_stated_in_text
 from src.llm_tasks import llm_guess, route_question, write_scenario
 from src.answer_check import check_answer
 from src.code_version import build_info, build_label, code_version
@@ -968,8 +968,10 @@ def audit_for_route(route):
         event = dict(route["event"])
         if event.get("country") and not event.get("region"):
             event["region"] = COUNTRY_REGIONS.get(event["country"])
+        truth = route.get("stated_true_type")
+        truth = truth if type_stated_in_text(truth, st.session_state.session_cases.message) else None
         case = make_event_case(event, FEATURE_NAMES, st.session_state.session_cases.next_id(),
-                               truth=route.get("stated_true_type"), class_names=registry.class_names)
+                               truth=truth, class_names=registry.class_names)
         st.session_state.session_cases.add(case)
     else:
         return None
@@ -1000,6 +1002,7 @@ def answer_with_plain_llm(question, offline_reason=None):
         if m.get("content")
     ]
 
+    st.session_state.session_cases.message = question  # as typed: code-side checks (e.g. a stated true type) read this
     route = None
     gemini_key = "" if offline_reason else st.session_state.gemini_api_key.strip()
     if gemini_key:

@@ -171,3 +171,25 @@ def test_a_named_country_beats_a_region_alone(tools):
     msg = "In the Philippines, wind speed was recorded in November over 2 days."
     result, _, audit, _ = classify(tools, SessionCases(), msg, region="Asia", start_month=11, magnitude_scale="Kph")
     assert audit["case"]["event"]["country"] == "Philippines"
+
+
+def test_a_guessed_true_type_does_not_score_the_model(tools):
+    """Gemini passed stated_true_type=Storm for 'wind speed was recorded' and the card said 'Correct'."""
+    msg = "In the Philippines, wind speed was recorded in November over 2 days."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, country="Philippines", start_month=11,
+                                   duration_days=2, magnitude_scale="Kph", stated_true_type="Storm")
+    assert audit["case"]["ground_truth_class"] is None and "unconfirmed" in result["note"]
+
+    msg = "A typhoon hit the Philippines in November for 2 days; wind speed was recorded."
+    result, _, audit, _ = classify(tools, SessionCases(), msg, country="Philippines", start_month=11,
+                                   duration_days=2, magnitude_scale="Kph", stated_true_type="Storm")
+    assert audit["case"]["ground_truth_class"] == "Storm"
+
+
+def test_type_words_say_what_it_was_not_what_was_measured():
+    from src.event_features import type_stated_in_text
+    assert type_stated_in_text("Flood", "เกิดน้ำท่วมที่เชียงใหม่")
+    assert type_stated_in_text("Earthquake", "a quake of magnitude 6")
+    assert not type_stated_in_text("Extreme Temperature", "อุณหภูมิถูกบันทึกไว้แต่ไม่มีตัวเลข")
+    assert not type_stated_in_text("Storm", "wind speed was recorded")
+    assert not type_stated_in_text(None, "storm")

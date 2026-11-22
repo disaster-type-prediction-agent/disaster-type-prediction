@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled,
-                                missing_details, scale_from_text, country_from_text, duration_from_text)
+                                missing_details, scale_from_text, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -316,8 +316,13 @@ class AuditorTools:
                              "and the app will then run the models with default values. Do not guess the disaster type.")},
                         "Asked for more details", None, [])
             session.asked_details_on = None
+            truth = args.get("stated_true_type")
+            if truth and not type_stated_in_text(truth, text):
+                # The LLM guessed the type; the user never said it. A guess must not score the model.
+                notes.append(f"The true type was left unconfirmed: the user didn't say it was {truth}.")
+                truth = None
             case = make_event_case(event, self.registry.feature_names, session.next_id(),
-                                   truth=args.get("stated_true_type"), class_names=self.classes)
+                                   truth=truth, class_names=self.classes)
             session.add(case)
             audit = self.registry.audit_case(case, models)
             result = self._case_payload(audit)

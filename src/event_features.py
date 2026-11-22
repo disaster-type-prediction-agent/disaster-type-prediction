@@ -101,6 +101,32 @@ def duration_from_text(text: Optional[str]) -> Optional[float]:
     n, unit = found.pop()
     return round(n * _DAYS_PER[unit], 2)
 
+
+# Words that SAY what an event was (the disaster type itself), English and Thai. Unlike the class words the
+# answer check accepts, measurement words ("temperature", "อุณหภูมิ") are not here: naming what was measured
+# is not saying what the event was.
+TYPE_WORDS = {
+    "Drought": ["drought", "dry spell", "ภัยแล้ง", "แล้ง"],
+    "Earthquake": ["earthquake", "quake", "tremor", "แผ่นดินไหว"],
+    "Epidemic": ["epidemic", "outbreak", "pandemic", "โรคระบาด", "การระบาด"],
+    "Extreme Temperature": ["extreme temperature", "heatwave", "heat wave", "cold wave", "cold snap", "คลื่นความร้อน",
+                            "คลื่นความหนาว", "ร้อนจัด", "หนาวจัด", "อุณหภูมิสุดขั้ว"],
+    "Flood": ["flood", "ท่วม", "อุทกภัย"],
+    "Landslide": ["landslide", "mudslide", "rockslide", "ดินถล่ม", "ดินโคลนถล่ม", "ดินสไลด์"],
+    "Storm": ["storm", "typhoon", "cyclone", "hurricane", "tornado", "พายุ", "ไต้ฝุ่น"],
+    "Wildfire": ["wildfire", "bushfire", "forest fire", "ไฟป่า"],
+}
+
+
+def type_stated_in_text(cls: Optional[str], text: Optional[str]) -> bool:
+    """Whether the user's own words say the event was this type ("it was a storm", "น้ำท่วม").
+
+    stated_true_type scores the model on "Your event", so the LLM may pass it only when the user said it:
+    reading "wind speed was recorded" as a Storm is a guess, and it marked the model "Correct" on its own say-so."""
+    low = (text or "").lower()
+    return bool(cls) and any((re.search(r"(?<![a-z])" + re.escape(w), low) if w.isascii() else w in low)
+                             for w in TYPE_WORDS.get(cls, []))
+
 _NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
                            r"|\bmagnitude (?:was |is )?(?:unknown|not (?:recorded|given|known|reported))\b")
 
