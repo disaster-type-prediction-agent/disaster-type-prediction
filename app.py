@@ -17,7 +17,7 @@ from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAge
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events
 from src.llm_tasks import llm_guess, route_question, write_scenario
 from src.answer_check import check_answer
-from src.code_version import code_version
+from src.code_version import build_info, build_label, code_version
 from src.agent import SYSTEM_PROMPT as CHAT_PROMPT
 from src.auditor_agent import SYSTEM_PROMPT as AGENT_PROMPT
 from src.models.registry import ModelRegistry
@@ -301,6 +301,11 @@ st.html("""
 
 
 CODE_VERSION = code_version()  # cached objects below are rebuilt when src/ changes (see src/code_version.py)
+
+
+@st.cache_data(ttl=300, show_spinner=False)  # git runs at most every 5 minutes, not on every rerun
+def cached_build_info():
+    return build_info()
 
 
 @st.cache_resource(max_entries=1)  # one registry in memory: a new code version replaces the old one
@@ -1606,6 +1611,10 @@ with st.sidebar:
         f"Test bank: {registry.metadata['total_test_cases']:,} records · "
         f"{len(registry.class_names)} classes · {registry.metadata['disagreement_cases']} disagreements"
     )
+    build = cached_build_info()
+    st.caption(f":material/commit: {build_label(build)}",
+               help=(f"Latest commit: {build['subject']}. " if build.get("subject") else "")
+               + "Match this against `git log` to know which code the app is running.")
 
 
 # -------------------------------------------------------------

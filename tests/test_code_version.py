@@ -33,3 +33,29 @@ def test_app_rebuilds_the_agent_tools_when_the_code_changes(app):
         with mock.patch("src.code_version.code_version", return_value="new-version"):
             at.run()                               # code changed: tools rebuilt
     assert built == [1]
+
+
+def test_build_label_shows_commit_time_and_branch():
+    from src.code_version import build_label
+    info = {"commit": "37561c5", "time": "2026-11-22 14:10 +0700", "subject": "fix", "branch": "agentic-ai-auditor"}
+    assert build_label(info) == "Version 37561c5 · 2026-11-22 14:10 +0700 · agentic-ai-auditor"
+    assert build_label({**info, "branch": None}) == "Version 37561c5 · 2026-11-22 14:10 +0700"
+
+
+def test_build_info_falls_back_to_the_code_fingerprint_without_git(tmp_path):
+    from src.code_version import build_info, build_label
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("x = 1\n")
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError("git")):
+        info = build_info(src)
+    assert info["commit"] is None and info["code"] == code_version(src)[:7]
+    assert build_label(info).startswith("Version: code ")
+
+
+def test_sidebar_shows_the_running_version(app):
+    from src.code_version import build_info
+    at = app({})
+    at.run()
+    commit = build_info()["commit"]
+    assert any(commit and commit in c.value for c in at.sidebar.caption)
