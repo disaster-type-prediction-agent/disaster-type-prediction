@@ -96,3 +96,39 @@ def test_a_new_place_in_the_answer_is_not_overwritten(tools):
     session.message = "actually somewhere in Europe"
     _, _, audit, _ = tools.execute("classify_event", {"region": "Europe", "start_month": 3}, ["Random Forest"], session)
     assert audit["case"]["event"]["country"] is None and audit["case"]["event"]["region"] == "Europe"
+
+
+def test_nothing_measured_needs_the_users_words():
+    from src.event_features import says_nothing_measured
+    for said in ["ไม่มีการวัดค่าใด ๆ ไว้", "ไม่ได้วัดอะไรเลย", "โดยไม่มีการบันทึกขนาดความรุนแรง",
+                 "Nothing was measured for it", "no measurement was taken", "it wasn't measured"]:
+        assert says_nothing_measured(said), said
+    for not_said in ["ไม่ทราบครับ", "I don't know", "ไม่มีการบันทึกระยะเวลา", "the duration wasn't recorded", None]:
+        assert not says_nothing_measured(not_said), not_said
+
+
+def test_thai_country_names_are_read():
+    import json
+    from src.event_features import country_from_text, countries_from
+    names = countries_from(json.load(open("models/metadata.json"))["feature_names"])
+    assert country_from_text("มีเหตุการณ์เกิดขึ้นที่ญี่ปุ่นเดือนมีนาคม", names) == "Japan"
+    assert country_from_text("เกิดที่ซูดานใต้", names) == "South Sudan"
+    assert country_from_text("ที่สาธารณรัฐประชาธิปไตยคองโก", names) == "Democratic Republic of the Congo"
+    assert country_from_text("เกิดเหตุที่ฮ่องกง", names) == "China, Hong Kong Special Administrative Region"
+    assert country_from_text("ลาวาไหลลงมา", names) is None
+
+
+def test_live_app_conversation_now_gives_japan_and_averages(tools):
+    """The exact tool calls Gemini made in the live app: region only, then nothing_measured on 'ไม่ทราบครับ'."""
+    session = SessionCases()
+    session.message = "มีเหตุการณ์เกิดขึ้นที่ญี่ปุ่นเดือนมีนาคม กินเวลา 1 วัน"
+    result, _, _, _ = tools.execute("classify_event", {"region": "Asia", "start_month": 3}, ["Random Forest"], session)
+    assert result["status"] == "need_more_details" and result["given_so_far"]["country"] == "Japan"
+
+    session.message = "ไม่ทราบครับ"
+    result, _, audit, _ = tools.execute("classify_event", {"region": "Asia", "start_month": 3, "nothing_measured": True},
+                                        ["Random Forest"], session)
+    case = audit["case"]
+    assert case["event"]["country"] == "Japan" and case["scale_not_given"]
+    assert "nothing_measured was ignored" in result["note"]
+    assert audit["models"]["Random Forest"]["prediction"]["predicted_class"] == "Earthquake"

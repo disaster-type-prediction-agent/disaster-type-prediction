@@ -62,9 +62,42 @@ COUNTRY_ALIASES = {"usa": "United States of America", "united states": "United S
                    "syria": "Syrian Arab Republic", "tanzania": "United Republic of Tanzania", "turkey": "Türkiye",
                    "hong kong": "China, Hong Kong Special Administrative Region", "dr congo": "Democratic Republic of the Congo"}
 
+# Thai names, for the same safety net: Gemini sometimes reads "ญี่ปุ่น" as region Asia and drops the country.
+# Longer names win (see country_from_text), so "ซูดานใต้" is not also read as "ซูดาน". Bare "ลาว" is left out:
+# it is also the start of "ลาวา" (lava).
+THAI_COUNTRY_NAMES = {
+    "ญี่ปุ่น": "Japan", "จีน": "China", "อินเดีย": "India", "อินโดนีเซีย": "Indonesia", "ฟิลิปปินส์": "Philippines",
+    "ไทย": "Thailand", "เวียดนาม": "Viet Nam", "เมียนมา": "Myanmar", "เมียนมาร์": "Myanmar", "พม่า": "Myanmar",
+    "กัมพูชา": "Cambodia", "ประเทศลาว": "Lao People's Democratic Republic", "สปป.ลาว": "Lao People's Democratic Republic",
+    "สปป. ลาว": "Lao People's Democratic Republic", "มาเลเซีย": "Malaysia", "สิงคโปร์": "Singapore",
+    "บังกลาเทศ": "Bangladesh", "บังคลาเทศ": "Bangladesh", "ปากีสถาน": "Pakistan", "เนปาล": "Nepal",
+    "ศรีลังกา": "Sri Lanka", "อัฟกานิสถาน": "Afghanistan", "อิหร่าน": "Iran (Islamic Republic of)", "อิรัก": "Iraq",
+    "ตุรกี": "Türkiye", "ทูร์เคีย": "Türkiye", "ซาอุดีอาระเบีย": "Saudi Arabia", "เยเมน": "Yemen",
+    "เกาหลีใต้": "Republic of Korea", "เกาหลีเหนือ": "Democratic People's Republic of Korea", "มองโกเลีย": "Mongolia",
+    "ไต้หวัน": "Taiwan (Province of China)", "ฮ่องกง": "China, Hong Kong Special Administrative Region",
+    "ติมอร์-เลสเต": "Timor-Leste", "คาซัคสถาน": "Kazakhstan", "ซีเรีย": "Syrian Arab Republic", "อิสราเอล": "Israel",
+    "จอร์แดน": "Jordan", "สหรัฐอเมริกา": "United States of America", "สหรัฐฯ": "United States of America",
+    "อเมริกา": "United States of America", "แคนาดา": "Canada", "เม็กซิโก": "Mexico", "บราซิล": "Brazil",
+    "อาร์เจนตินา": "Argentina", "ชิลี": "Chile", "เปรู": "Peru", "โคลอมเบีย": "Colombia", "เอกวาดอร์": "Ecuador",
+    "โบลิเวีย": "Bolivia (Plurinational State of)", "เวเนซุเอลา": "Venezuela (Bolivarian Republic of)", "คิวบา": "Cuba",
+    "เฮติ": "Haiti", "กัวเตมาลา": "Guatemala", "ฮอนดูรัส": "Honduras", "ออสเตรเลีย": "Australia",
+    "นิวซีแลนด์": "New Zealand", "ปาปัวนิวกินี": "Papua New Guinea", "ฟิจิ": "Fiji",
+    "สหราชอาณาจักร": "United Kingdom of Great Britain and Northern Ireland", "อังกฤษ": "United Kingdom of Great Britain and Northern Ireland",
+    "ฝรั่งเศส": "France", "เยอรมนี": "Germany", "เยอรมัน": "Germany", "อิตาลี": "Italy", "สเปน": "Spain",
+    "โปรตุเกส": "Portugal", "กรีซ": "Greece", "รัสเซีย": "Russian Federation", "ยูเครน": "Ukraine", "โปแลนด์": "Poland",
+    "โรมาเนีย": "Romania", "เนเธอร์แลนด์": "Netherlands (Kingdom of the)", "สวิตเซอร์แลนด์": "Switzerland",
+    "อียิปต์": "Egypt", "ไนจีเรีย": "Nigeria", "เคนยา": "Kenya", "เอธิโอเปีย": "Ethiopia", "โซมาเลีย": "Somalia",
+    "ซูดานใต้": "South Sudan", "ซูดาน": "Sudan", "แอฟริกาใต้": "South Africa",
+    "สาธารณรัฐประชาธิปไตยคองโก": "Democratic Republic of the Congo", "คองโก": "Congo", "ยูกันดา": "Uganda",
+    "แทนซาเนีย": "United Republic of Tanzania", "โมซัมบิก": "Mozambique", "มาดากัสการ์": "Madagascar",
+    "มาลาวี": "Malawi", "ซิมบับเว": "Zimbabwe", "แซมเบีย": "Zambia", "ไนเจอร์": "Niger", "มาลี": "Mali",
+    "ชาด": "Chad", "กานา": "Ghana", "แคเมอรูน": "Cameroon", "แองโกลา": "Angola", "โมร็อกโก": "Morocco",
+    "แอลจีเรีย": "Algeria", "บุรุนดี": "Burundi", "รวันดา": "Rwanda",
+}
+
 
 def country_from_text(text: Optional[str], countries: List[str]) -> Optional[str]:
-    """The one country an English message names, or None (none, several, or not in the models' list).
+    """The one country a message names (English, or the Thai names above), or None (none, several, or not in the models' list).
 
     A safety net for the LLM reader. Longer names are matched first and taken out of the text, so "Congo"
     inside "Democratic Republic of the Congo" or "Guinea" inside "Papua New Guinea" is not counted again."""
@@ -74,7 +107,7 @@ def country_from_text(text: Optional[str], countries: List[str]) -> Optional[str
         names[c.lower()] = c
         short = c.split(" (")[0].lower()  # "Iran (Islamic Republic of)" -> "iran"
         names.setdefault(short, c)
-    for alias, c in COUNTRY_ALIASES.items():
+    for alias, c in {**COUNTRY_ALIASES, **THAI_COUNTRY_NAMES}.items():
         if c in countries:
             names.setdefault(alias, c)
     found = set()
@@ -126,6 +159,24 @@ def type_stated_in_text(cls: Optional[str], text: Optional[str]) -> bool:
     low = (text or "").lower()
     return bool(cls) and any((re.search(r"(?<![a-z])" + re.escape(w), low) if w.isascii() else w in low)
                              for w in TYPE_WORDS.get(cls, []))
+
+# The user saying nothing was measured, as opposed to not knowing. Thai has no spaces, so it matches anywhere.
+_NOTHING_MEASURED = re.compile(
+    r"nothing (?:was |is |has been )?(?:measured|recorded)|nothing at all was (?:measured|recorded)"
+    r"|no (?:measurements?|figures?) (?:was |were )?(?:taken|recorded|made|given)|no measurements?\b"
+    r"|(?:was|were)(?:n't| not) measured|not measured|unmeasured"
+    r"|(?:magnitude|size|measurement)s? (?:was |were )?(?:not|n't) (?:recorded|measured|given)"
+    r"|ไม่มีการวัด|ไม่ได้วัด|ไม่ได้มีการวัด|ไม่มีค่าที่วัด|ไม่มีข้อมูลการวัด"
+    r"|ไม่(?:มี|ได้|ได้มี)การบันทึก(?:ขนาด|ค่า|ความรุนแรง|การวัด)|ไม่ได้บันทึก(?:ขนาด|ค่า|ความรุนแรง)")
+
+
+def says_nothing_measured(text: Optional[str]) -> bool:
+    """Whether the user's own words say nothing was measured ("ไม่มีการวัด", "nothing was recorded").
+
+    nothing_measured feeds the models the Unknown scale, which reads as Landslide or Epidemic. In the app,
+    Gemini passed it for a bare "ไม่ทราบครับ" (I don't know), so it counts only when the words say so."""
+    return bool(_NOTHING_MEASURED.search((text or "").lower()))
+
 
 _NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
                            r"|\bmagnitude (?:was |is )?(?:unknown|not (?:recorded|given|known|reported))\b")

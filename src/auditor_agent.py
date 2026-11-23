@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, scale_from_text, country_from_text, duration_from_text, type_stated_in_text)
+                                missing_details, says_nothing_measured, scale_from_text, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -320,6 +320,11 @@ class AuditorTools:
                 if days is not None:
                     event["duration_days"] = days
                     notes.append(f"Duration {days:g} days was read from the message by the app.")
+            if nothing_measured and not says_nothing_measured(text):
+                # The LLM read "I don't know" as "nothing measured" (seen in the app on "ไม่ทราบครับ"). That would
+                # feed the models the Unknown scale; not knowing is averaged over likely scales instead.
+                nothing_measured = False
+                notes.append("nothing_measured was ignored: the user didn't say nothing was measured.")
             if event["magnitude_scale"] in (None, "Unknown"):
                 event["magnitude_scale"] = None
                 scale = scale_from_text(text)
