@@ -368,7 +368,7 @@ class AuditorTools:
                 notes.append(f"Country '{args['country']}' is not one the models know; it was left out.")
             if notes:
                 result["note"] = " ".join(notes)
-            return result, f"Classified {case['case_id']} ({country or 'no country'})", audit, models
+            return result, f"Classified {case['case_id']} ({event['country'] or 'no country'})", audit, models
 
         if name == "find_case":
             models = list(args.get("models") or default_models)

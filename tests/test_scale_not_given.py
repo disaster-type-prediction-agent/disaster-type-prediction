@@ -126,8 +126,9 @@ def test_live_app_conversation_now_gives_japan_and_averages(tools):
     assert result["status"] == "need_more_details" and result["given_so_far"]["country"] == "Japan"
 
     session.message = "ไม่ทราบครับ"
-    result, _, audit, _ = tools.execute("classify_event", {"region": "Asia", "start_month": 3, "nothing_measured": True},
-                                        ["Random Forest"], session)
+    result, summary, audit, _ = tools.execute("classify_event", {"region": "Asia", "start_month": 3, "nothing_measured": True},
+                                              ["Random Forest"], session)
+    assert summary.endswith("(Japan)")  # the step label shows the country the app settled on, not Gemini's argument
     case = audit["case"]
     assert case["event"]["country"] == "Japan" and case["scale_not_given"]
     assert "nothing_measured was ignored" in result["note"]
