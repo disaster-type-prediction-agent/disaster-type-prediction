@@ -3,7 +3,7 @@ import json
 from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-from src.event_features import (MAGNITUDE_SCALES, REGIONS, attribute_values, make_event_case, mark_filled,
+from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
                                 missing_details, scale_from_text, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
@@ -19,6 +19,7 @@ How to work:
 - When the user wants to see, test or find a case, call find_case (or get_case for a specific id). The app shows each case you load as a card, so summarize what matters instead of repeating every field.
 - When the user describes a specific event of their own (a place, month, duration, or size such as wind speed or area), call classify_event with only the details they actually gave; pass stated_true_type only if they say what it really was. Then tell them which attributes were missing (filled with training defaults) and that adding them may change the prediction.
 - If classify_event returns need_more_details, the models did not run: ask the user for those details (one short question) and stop; never predict or hint at a type yourself. On their next message, call classify_event again with everything they've said so far (it runs then, even if they don't know the rest; if they say nothing was measured, pass nothing_measured=true).
+- "Nothing was measured" and "not said" are different. Pass nothing_measured=true only when the user says nothing was measured; then the models see the Unknown scale, as for recorded events without a measurement. If the user just doesn't say or doesn't know, leave both out: the app averages the models over the scales usually recorded for that place and month, and the case shows that mix. Never set magnitude_scale from the disaster the user describes (an earthquake, a flood), only from a quantity they say was measured.
 - To revisit a case already loaded or classified (another model, why not X, more detail), use get_case or explain_prediction with its id (EVENT-n or CASE-n). Call classify_event again only when the user changes or adds event details; otherwise you'd create a duplicate event.
 - Write for people: say "not given (default used)" and "% of the evidence", never raw field names like filled_in or share_pct.
 - If the question is about particular models, pass them in `models`; otherwise leave it out to use the models selected in the UI.
@@ -312,8 +313,11 @@ class AuditorTools:
                 return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
                          "instruction": (
                              "The models were NOT run. Ask the user, in one short question in their language, for the "
-                             "missing details listed, with an example or two. Say they can answer that they don't know, "
-                             "and the app will then run the models with default values. Do not guess the disaster type.")},
+                             "missing details listed, with an example or two. For what was measured, offer the choices "
+                             "(affected area, wind speed, magnitude, temperature, people vaccinated, or nothing was "
+                             "measured), never one that hints at a disaster type. Say they can answer that they don't "
+                             "know, and the app will then run the models with default values (an unknown measurement is "
+                             "averaged over what is usually recorded there). Do not guess the disaster type.")},
                         "Asked for more details", None, [])
             session.asked_details_on = None
             truth = args.get("stated_true_type")
@@ -368,10 +372,13 @@ class AuditorTools:
             if not case:
                 return {"error": f"Case '{args['case_id']}' not found."}, f"Case {args['case_id']} not found", None, []
             model = self.registry.get_model(args["model"])
-            prediction = case["evaluations"].get(args["model"]) or model.predict(case["features"])
+            prediction = case["evaluations"].get(args["model"])
+            features = case["features"]
+            if not prediction:
+                prediction, features = self.registry.predict_case(case, args["model"])
             target = args.get("target_class")
             target_idx = self.classes.index(target) if target else prediction["predicted_id"]
-            shap = model.explain(case["features"], target_class_idx=target_idx, top_k=args.get("top_k", 5))
+            shap = model.explain(features, target_class_idx=target_idx, top_k=args.get("top_k", 5))
             mark_filled(shap, case.get("filled", []))
             slim = lambda rows: [{"feature": r["feature"], "value": r["value"], "shap": r["shap_value"]} for r in rows]
             result = {
@@ -427,7 +434,7 @@ class AuditorTools:
             "case_id": case["case_id"],
             "source": "user-described event" if case.get("source") == "user" else "held-out test bank",
             "ground_truth": case["ground_truth_class"],
-            "attributes": attribute_values(case["features"]),
+            "attributes": case_attribute_values(case, next(iter(audit["models"].values()), {}).get("prediction")),
             "filled_in": case.get("filled", []),
             "models": models,
             "models_disagree_in_full_bank": case.get("is_disagreement", False),

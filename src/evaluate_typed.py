@@ -25,6 +25,16 @@ OUT_DIR = Path("reports/typed_eval")
 RESULTS = OUT_DIR / "results.jsonl"
 MODELS = ["Random Forest", "LightGBM", "XGBoost"]
 NO_MORE = {"Thai": "ไม่ทราบรายละเอียดอื่นแล้ว เท่าที่บอกไปคือทั้งหมด", "English": "I don't know any other details; that's all I have."}
+# The record says nothing was measured (scale Unknown): a user who knows the event says so, rather than leaving
+# the agent to guess whether "that's all I have" means "nothing measured" or "I don't know".
+NOTHING_MEASURED = {"Thai": "ไม่มีการวัดค่าใด ๆ ไว้ และไม่ทราบรายละเอียดอื่นแล้ว",
+                    "English": "Nothing was measured for it, and I don't know any other details."}
+
+
+def follow_up_reply(event, language):
+    """What the simulated user answers when the app asks for more details: only what the record holds."""
+    replies = NOTHING_MEASURED if event.get("magnitude_scale") == "Unknown" else NO_MORE
+    return replies[language]
 ATTRIBUTES = ["Country", "Region", "Start month", "Event duration", "Magnitude scale", "Magnitude value"]
 
 
@@ -93,7 +103,7 @@ def run_case(case, index, key, tools, registry, calls):
         # The app asked for more details. The message already holds everything the case records, so answer
         # the way a user who knows nothing more would, and the models then run on what was given.
         asked_back = text
-        text = turn(NO_MORE[language])
+        text = turn(follow_up_reply(event, language))
     record.update({"tools": tool_names, "answer": text, "asked_back": asked_back, "agent_error": error,
                    "gemini_calls": calls["n"] - start})
 

@@ -1087,6 +1087,11 @@ def render_audit_card(audit, tested_models, key_suffix):
             if case.get("filled"):
                 st.caption(f":orange[:material/info:] Not given, filled with training defaults: {', '.join(case['filled'])}. "
                            "Add them for a more reliable prediction.")
+            mix = next(iter(audit["models"].values()), {}).get("prediction", {}).get("scale_mix")
+            if mix:
+                st.caption(":material/balance: What was measured was not given, so each model ran once per scale usually "
+                           "recorded there and the results were averaged: "
+                           + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix) + ".")
         else:
             st.markdown(f":material/description: **Case {case['case_id']}** · ground truth **{truth}**")
             st.caption(

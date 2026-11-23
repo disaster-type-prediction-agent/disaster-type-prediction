@@ -32,3 +32,9 @@ def test_summary_compares_direct_and_typed(tmp_path, monkeypatch):
     assert "Explanations matching the model output: **2/3**" in report
     assert "C2 (Flood → Drought), misread: Start month" in report
     assert (tmp_path / "summary.csv").read_text().startswith("model,")
+
+
+def test_simulated_user_says_nothing_was_measured_only_when_the_record_says_so():
+    assert ev.follow_up_reply({"magnitude_scale": "Unknown"}, "English") == ev.NOTHING_MEASURED["English"]
+    assert ev.follow_up_reply({"magnitude_scale": "Kph"}, "Thai") == ev.NO_MORE["Thai"]
+    assert ev.follow_up_reply({"magnitude_scale": "Km2"}, "English") == ev.NO_MORE["English"]

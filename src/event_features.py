@@ -262,6 +262,18 @@ def attribute_values(features: Dict[str, float]) -> Dict[str, str]:
     }
 
 
+def case_attribute_values(case: Dict[str, Any], prediction: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """attribute_values for a case, saying "not given" for a scale the user never stated (not "Unknown",
+    which means nothing was measured), with the scales the models were averaged over."""
+    values = attribute_values(case.get("features", {}))
+    if case.get("scale_not_given"):
+        mix = (prediction or {}).get("scale_mix")
+        values["Magnitude scale"] = "not given" + (
+            " (models averaged over the scales usually recorded there: "
+            + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix) + ")" if mix else "")
+    return values
+
+
 def attribute_shap(feature_names: List[str], features: Dict[str, float], shap_values) -> List[Dict[str, Any]]:
     """SHAP summed back into the 6 attributes, largest effect first.
 
@@ -340,7 +352,7 @@ def describe_event(event: Dict[str, Any]) -> str:
         f"- Start month: {event.get('start_month') or 'unknown'}",
         f"- Duration: {event['duration_days']} days" if event.get("duration_days") is not None else "- Duration: unknown",
         f"- Magnitude: {mag} ({event.get('magnitude_scale') or 'Unknown'})" if mag is not None
-        else f"- Magnitude: not recorded (scale: {event.get('magnitude_scale') or 'Unknown'})",
+        else f"- Magnitude: not recorded (scale: {event.get('magnitude_scale') or 'not given'})",
     ])
 
 
@@ -359,10 +371,13 @@ def make_event_case(event: Dict[str, Any], feature_names: List[str], case_id: st
             "country": event.get("country") or "Unknown",
             "region": event.get("region") or "Unknown",
             "start_month": event.get("start_month") or 1,
-            "magnitude_scale": event.get("magnitude_scale") or "Unknown",
+            "magnitude_scale": event.get("magnitude_scale") or "not given",
             "magnitude_missing": event.get("magnitude_value") is None,
         },
         "features": build_features(event, feature_names),
+        # No scale given is not "nothing was measured" (scale Unknown): the registry then averages the models
+        # over the scales usually recorded for that place and month instead of feeding them "Unknown".
+        "scale_not_given": not event.get("magnitude_scale"),
         "evaluations": {},
         "is_disagreement": False,
     }

@@ -2,11 +2,12 @@ import os
 import json
 import random
 import joblib
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from src.models.rf_model import RandomForestModel
 from src.models.lgb_model import LightGBMModel
 from src.models.xgb_model import XGBoostModel
-from src.event_features import explain_contrast, mark_filled
+from src.event_features import build_features, explain_contrast, mark_filled
+from src.scale_prior import PRIOR_PATH, ScalePrior
 
 class ModelRegistry:
     def __init__(self, bank_path: str = "models/multi_model_bank.joblib", meta_path: str = "models/multi_model_metadata.json"):
@@ -23,6 +24,47 @@ class ModelRegistry:
 
         # Lazy models container
         self._models: Dict[str, Any] = {}
+        self._scale_prior: Optional[ScalePrior] = None
+
+    @property
+    def scale_prior(self) -> ScalePrior:
+        if self._scale_prior is None:
+            self._scale_prior = ScalePrior.load(PRIOR_PATH)
+        return self._scale_prior
+
+    def scale_mix(self, case: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """For an event whose magnitude scale was not given: P(scale | its country, region, month), else None."""
+        if not case.get("scale_not_given"):
+            return None
+        event = case.get("event") or {}
+        return self.scale_prior.weights(event.get("country"), event.get("region"), event.get("start_month"))
+
+    def predict_case(self, case: Dict[str, Any], model_name: str) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """One model's prediction on a case, plus the feature record to explain it with.
+
+        Scale not given: the model runs once per likely scale and the class probabilities are averaged,
+        weighted by how often each scale is recorded there (sum over s of P(type | ..., s) * P(s | place, month)).
+        SHAP then explains the single scale that contributes most to the winning class."""
+        model = self.get_model(model_name)
+        mix = self.scale_mix(case)
+        if not mix:
+            return model.predict(case["features"]), case["features"]
+        event = case["event"]
+        runs = {s: build_features({**event, "magnitude_scale": s}, self.feature_names) for s in mix}
+        preds = {s: model.predict(f) for s, f in runs.items()}
+        probs = {c: sum(w * preds[s]["probabilities"][c] for s, w in mix.items()) for c in self.class_names}
+        best = max(probs, key=probs.get)
+        lead = max(mix, key=lambda s: mix[s] * preds[s]["probabilities"][best])
+        prediction = {
+            "predicted_id": self.class_names.index(best),
+            "predicted_class": best,
+            "confidence": probs[best],
+            "probabilities": probs,
+            "scale_mix": [{"scale": s, "weight": round(w, 3), "predicted_class": preds[s]["predicted_class"]}
+                          for s, w in mix.items()],
+            "explained_with_scale": lead,
+        }
+        return prediction, runs[lead]
 
     def get_model(self, name: str):
         if name not in self._models:
@@ -76,19 +118,19 @@ class ModelRegistry:
         """
         results = {}
         for m_name in model_names:
+            features = case["features"]
             if m_name in case["evaluations"]:
                 eval_info = case["evaluations"][m_name]
             else:
-                # Live inference fallback
-                m = self.get_model(m_name)
-                eval_info = m.predict(case["features"])
+                # Live inference fallback (averaged over likely scales when the scale was not given)
+                eval_info, features = self.predict_case(case, m_name)
                 # A user-described event has no ground truth until the user confirms it: None = unverified.
                 truth_id = case.get("ground_truth_id")
                 eval_info["is_correct"] = None if truth_id is None else bool(eval_info["predicted_id"] == truth_id)
 
             # Explain
             model_obj = self.get_model(m_name)
-            shap_info = model_obj.explain(case["features"], target_class_idx=eval_info["predicted_id"])
+            shap_info = model_obj.explain(features, target_class_idx=eval_info["predicted_id"])
             # Attributes a user left out were filled with training defaults: say so instead of citing them as reasons.
             mark_filled(shap_info, case.get("filled", []))
 
@@ -96,7 +138,7 @@ class ModelRegistry:
                 "prediction": eval_info,
                 "shap": shap_info,
                 "is_correct": eval_info["is_correct"],
-                "contrast": self.contrast(case, m_name, eval_info, shap_info),
+                "contrast": self.contrast(case, m_name, eval_info, shap_info, features),
             }
 
         return {
@@ -106,7 +148,7 @@ class ModelRegistry:
         }
 
     def contrast(self, case: Dict[str, Any], model_name: str, prediction: Dict[str, Any],
-                 predicted_shap: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                 predicted_shap: Dict[str, Any], features: Optional[Dict[str, float]] = None) -> Optional[Dict[str, Any]]:
         """'Why not X?': SHAP for the class the model did NOT pick, next to the one it did.
 
         X is the true type when the model got it wrong (the case worth auditing), otherwise the
@@ -121,7 +163,7 @@ class ModelRegistry:
             if runner_up is None:
                 return None
             target_id, reason = self.class_names.index(runner_up), "runner-up"
-        shap_info = self.get_model(model_name).explain(case["features"], target_class_idx=target_id)
+        shap_info = self.get_model(model_name).explain(features or case["features"], target_class_idx=target_id)
         mark_filled(shap_info, case.get("filled", []))
         result = {
             "class": shap_info["target_class"],
@@ -135,7 +177,15 @@ class ModelRegistry:
     def refresh_contrast(self, audit: Dict[str, Any]) -> None:
         """After the user confirms the true type, 'why not X?' should ask about that type."""
         for m_name, m in audit["models"].items():
-            m["contrast"] = self.contrast(audit["case"], m_name, m["prediction"], m["shap"])
+            features = self.explained_features(audit["case"], m["prediction"])
+            m["contrast"] = self.contrast(audit["case"], m_name, m["prediction"], m["shap"], features)
+
+    def explained_features(self, case: Dict[str, Any], prediction: Dict[str, Any]) -> Dict[str, float]:
+        """The feature record a prediction was explained with (its lead scale when the scale was not given)."""
+        scale = prediction.get("explained_with_scale")
+        if not scale:
+            return case["features"]
+        return build_features({**case["event"], "magnitude_scale": scale}, self.feature_names)
 
     def country_regions(self) -> Dict[str, str]:
         """Country -> region, as recorded in the test bank (used to fill in a described event's region)."""

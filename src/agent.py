@@ -208,7 +208,7 @@ class DisasterAuditorLLM:
         """Everything the models saw and said about the case on screen, so Gemini explains from data, not guesses."""
         if not current_case:
             return ""
-        from src.event_features import attribute_values
+        from src.event_features import case_attribute_values
 
         case = current_case.get("case", {})
         filled = set(case.get("filled", []))
@@ -216,7 +216,8 @@ class DisasterAuditorLLM:
         truth = case.get("ground_truth_class") or "not confirmed by the user yet"
         lines = [f"\n\nCURRENT AUDIT CASE CONTEXT ({source}):", f"- Case ID: {case.get('case_id')}", f"- Ground truth: {truth}",
                  "- The 6 attributes the models saw:"]
-        for name, value in attribute_values(case.get("features", {})).items():
+        first = next(iter(current_case.get("models", {}).values()), {}).get("prediction")
+        for name, value in case_attribute_values(case, first).items():
             note = "  [NOT GIVEN by the user: training default filled in]" if name in filled else ""
             lines.append(f"    {name}: {value}{note}")
 
