@@ -160,14 +160,18 @@ def type_stated_in_text(cls: Optional[str], text: Optional[str]) -> bool:
     return bool(cls) and any((re.search(r"(?<![a-z])" + re.escape(w), low) if w.isascii() else w in low)
                              for w in TYPE_WORDS.get(cls, []))
 
-# The user saying nothing was measured, as opposed to not knowing. Thai has no spaces, so it matches anywhere.
+# The user saying nothing was measured, as opposed to not knowing. "No figure was recorded" is NOT one:
+# it means a quantity was measured without a number (that is a scale with no value). Thai has no spaces, so it matches anywhere.
 _NOTHING_MEASURED = re.compile(
     r"nothing (?:was |is |has been )?(?:measured|recorded)|nothing at all was (?:measured|recorded)"
-    r"|no (?:measurements?|figures?) (?:was |were )?(?:taken|recorded|made|given)|no measurements?\b"
+    r"|no measurements? (?:was |were )?(?:taken|recorded|made|given)|no measurements?\b"
     r"|(?:was|were)(?:n't| not) measured|not measured|unmeasured"
     r"|(?:magnitude|size|measurement)s? (?:was |were )?(?:not|n't) (?:recorded|measured|given)"
+    r"|no (?:recorded |known )?(?:magnitude|size|measurement)s?\b(?! (?:of|for) )"
+    r"|without (?:a |any )?(?:recorded |known )?(?:magnitude|measurement)s?\b"
     r"|ไม่มีการวัด|ไม่ได้วัด|ไม่ได้มีการวัด|ไม่มีค่าที่วัด|ไม่มีข้อมูลการวัด"
-    r"|ไม่(?:มี|ได้|ได้มี)การบันทึก(?:ขนาด|ค่า|ความรุนแรง|การวัด)|ไม่ได้บันทึก(?:ขนาด|ค่า|ความรุนแรง)")
+    r"|ไม่(?:มี|ได้|ได้มี)(?:การ)?บันทึก(?:ขนาด|ค่า|ความรุนแรง|การวัด)|ไม่ได้บันทึก(?:ขนาด|ค่า|ความรุนแรง)"
+    r"|ไม่มี\S{0,20}ขนาด\S{0,10}ที่บันทึก")
 
 
 def says_nothing_measured(text: Optional[str]) -> bool:

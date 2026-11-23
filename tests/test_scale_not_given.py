@@ -101,9 +101,15 @@ def test_a_new_place_in_the_answer_is_not_overwritten(tools):
 def test_nothing_measured_needs_the_users_words():
     from src.event_features import says_nothing_measured
     for said in ["ไม่มีการวัดค่าใด ๆ ไว้", "ไม่ได้วัดอะไรเลย", "โดยไม่มีการบันทึกขนาดความรุนแรง",
-                 "Nothing was measured for it", "no measurement was taken", "it wasn't measured"]:
+                 "Nothing was measured for it", "no measurement was taken", "it wasn't measured",
+                 # Typed eval, CASE-3143 and CASE-2824: Gemini's own phrasings that the first version missed
+                 "An emergency event occurred in Iran in December with no recorded magnitude.",
+                 "เกิดเหตุที่บราซิลในเดือนเมษายน โดยไม่มีระยะเวลาและขนาดที่บันทึกไว้", "ไม่มีบันทึกขนาดความรุนแรง",
+                 "it happened without any recorded measurement", "no magnitude was recorded"]:
         assert says_nothing_measured(said), said
-    for not_said in ["ไม่ทราบครับ", "I don't know", "ไม่มีการบันทึกระยะเวลา", "the duration wasn't recorded", None]:
+    for not_said in ["ไม่ทราบครับ", "I don't know", "ไม่มีการบันทึกระยะเวลา", "the duration wasn't recorded",
+                     "with no recorded duration", "no size of the crowd",
+                     "an area that was measured, though no figure was recorded", None]:
         assert not says_nothing_measured(not_said), not_said
 
 
