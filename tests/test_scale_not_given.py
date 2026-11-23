@@ -63,3 +63,36 @@ def test_explain_prediction_matches_the_averaged_prediction(tools, registry):
                                     ["Random Forest"], session)
     averaged = registry.predict_case(case, "Random Forest")[0]["predicted_class"]
     assert result["model_predicted"] == averaged == result["explained_class"]
+
+
+def test_answer_keeps_the_country_from_the_first_message(tools):
+    """Live app: "ญี่ปุ่น ... มีนาคม 1 วัน", then "ไม่ทราบครับ" came back as region Asia with no country."""
+    session = SessionCases()
+    session.message = "มีเหตุการณ์เกิดขึ้นที่ญี่ปุ่นเดือนมีนาคม กินเวลา 1 วัน"
+    result, _, audit, _ = tools.execute("classify_event", {"country": "Japan", "start_month": 3, "duration_days": 1},
+                                        ["Random Forest"], session)
+    assert result["status"] == "need_more_details"
+
+    session.message = "ไม่ทราบครับ"
+    result, _, audit, _ = tools.execute("classify_event", {"region": "Asia", "start_month": 3},
+                                        ["Random Forest"], session)
+    event = audit["case"]["event"]
+    assert event["country"] == "Japan" and event["duration_days"] == 1
+    assert "country" in result["note"] and session.asked_event is None
+    assert audit["models"]["Random Forest"]["prediction"]["predicted_class"] == "Earthquake"
+
+
+def test_a_new_place_in_the_answer_is_not_overwritten(tools):
+    session = SessionCases()
+    session.message = "something in Japan in March"
+    tools.execute("classify_event", {"country": "Japan", "start_month": 3}, ["Random Forest"], session)
+    session.message = "sorry, it was in Chile, I don't know what was measured"
+    _, _, audit, _ = tools.execute("classify_event", {"country": "Chile", "start_month": 3}, ["Random Forest"], session)
+    assert audit["case"]["event"]["country"] == "Chile"
+
+    session = SessionCases()
+    session.message = "something in Japan in March"
+    tools.execute("classify_event", {"country": "Japan", "start_month": 3}, ["Random Forest"], session)
+    session.message = "actually somewhere in Europe"
+    _, _, audit, _ = tools.execute("classify_event", {"region": "Europe", "start_month": 3}, ["Random Forest"], session)
+    assert audit["case"]["event"]["country"] is None and audit["case"]["event"]["region"] == "Europe"

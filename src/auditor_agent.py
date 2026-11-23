@@ -44,6 +44,25 @@ def _enum_or_none(value, allowed):
     return value is None or value in allowed
 
 
+def _keep_earlier_details(event: Dict[str, Any], earlier: Dict[str, Any]) -> List[str]:
+    """Fill what the answer to our question left out from the event the first message described.
+    Values in the answer win. A region that differs from the earlier one means the place changed: the
+    earlier country is then not kept. Returns the attributes filled in."""
+    kept = []
+    if not event.get("country") and earlier.get("country") and event.get("region") in (None, earlier.get("region")):
+        event["country"], event["region"] = earlier["country"], earlier.get("region")
+        kept.append("country")
+    for key, label in (("region", "region"), ("start_month", "month"), ("duration_days", "duration"),
+                       ("magnitude_value", "magnitude value")):
+        if event.get(key) is None and earlier.get(key) is not None:
+            event[key] = earlier[key]
+            kept.append(label)
+    if event.get("magnitude_scale") in (None, "Unknown") and earlier.get("magnitude_scale") not in (None, "", "Unknown"):
+        event["magnitude_scale"] = earlier["magnitude_scale"]
+        kept.append("magnitude scale")
+    return kept
+
+
 def _close_dangling_tool_calls(history: List[Dict[str, Any]], reason: str) -> None:
     """If the transcript ends on an assistant turn with unanswered tool calls, append error results for them.
 
@@ -69,6 +88,7 @@ class SessionCases:
         self.counter = 0
         self.message = ""  # the user's latest message as typed (no UI context), for checks done in code
         self.asked_details_on: Optional[str] = None  # the message on which classify_event asked for more details
+        self.asked_event: Optional[Dict[str, Any]] = None  # what that message gave, kept for the user's answer
 
     def next_id(self) -> str:
         self.counter += 1
@@ -280,11 +300,19 @@ class AuditorTools:
             text = session.message
             if session.asked_details_on and session.asked_details_on != session.message:
                 text = f"{session.asked_details_on}\n{session.message}"
+            answering = bool(session.asked_details_on and session.asked_details_on != session.message)
+            if answering and session.asked_event:
+                # The user is answering our question. The LLM sometimes re-sends only part of the first message
+                # (in the app, "ญี่ปุ่น ... มีนาคม" came back as region Asia with no country): keep what it gave.
+                kept = _keep_earlier_details(event, session.asked_event)
+                if kept:
+                    notes.append(f"Kept from the user's first message: {', '.join(kept)}.")
             # Safety nets for values the LLM sometimes leaves out although the message states them (in the
             # app, "In the Philippines, ..." came back without a country; "over 2 days" without a duration).
             if not event["country"]:  # a region alone is less: the country named in the message wins
                 found = country_from_text(text, self.countries)
-                if found:
+                # A region the LLM gave that doesn't fit the country found means the place changed ("actually in Europe").
+                if found and event["region"] in (None, self.country_regions.get(found)):
                     event["country"], event["region"] = found, self.country_regions.get(found)
                     notes.append(f"Country {found} was read from the message by the app.")
             if event["duration_days"] is None:
@@ -304,11 +332,11 @@ class AuditorTools:
                     event["magnitude_scale"] = "Unknown"  # a real answer, like the recorded cases with no measurement
             nothing_measured = nothing_measured and event["magnitude_scale"] == "Unknown"
             missing = missing_details(event, nothing_measured)
-            answered = session.asked_details_on is not None and session.asked_details_on != session.message
-            if missing and not answered:
+            if missing and not answering:
                 # Too little to predict from: ask first. Decided here in code, not left to the LLM. Asked once:
                 # whatever the user's next message adds, the models run on it (no loop of questions).
                 session.asked_details_on = session.message
+                session.asked_event = dict(event)
                 given = {k: v for k, v in event.items() if v not in (None, "", "Unknown")}
                 return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
                          "instruction": (
@@ -320,6 +348,7 @@ class AuditorTools:
                              "averaged over what is usually recorded there). Do not guess the disaster type.")},
                         "Asked for more details", None, [])
             session.asked_details_on = None
+            session.asked_event = None
             truth = args.get("stated_true_type")
             if truth and not type_stated_in_text(truth, text):
                 # The LLM guessed the type; the user never said it. A guess must not score the model.
