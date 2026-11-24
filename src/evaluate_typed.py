@@ -103,6 +103,8 @@ def run_case(case, index, key, tools, registry, calls):
         # The app asked for more details. The message already holds everything the case records, so answer
         # the way a user who knows nothing more would, and the models then run on what was given.
         asked_back = text
+        proposed = session.proposed_scale
+        record["proposed_scale"] = proposed[0] if proposed else None  # the app asked to confirm an observation
         text = turn(follow_up_reply(event, language))
     record.update({"tools": tool_names, "answer": text, "asked_back": asked_back, "agent_error": error,
                    "gemini_calls": calls["n"] - start})
@@ -115,6 +117,7 @@ def run_case(case, index, key, tools, registry, calls):
     record["read"] = {"correct": read["correct"], "wrong": [w["attribute"] for w in read["wrong"]],
                       "detail": read["wrong"]}
     audit = registry.audit_case(typed_case, MODELS)
+    record["scale_observed"] = (typed_case.get("scale_observed") or {}).get("scale")
     record["typed"] = {m: audit["models"][m]["prediction"]["predicted_class"] for m in MODELS}
     record["typed_confidence"] = {m: audit["models"][m]["prediction"]["confidence"] for m in MODELS}
     check = check_answer(text, [audit], [registry.leaderboard, registry.mcnemar])
@@ -212,6 +215,11 @@ def summarize():
     if any("asked_back" in r for r in records):  # recorded since the app started asking back
         asked = [r for r in records if r.get("asked_back")]
         lines.append(f"- Asked the user for more details first (too little given): **{len(asked)}/{n}**")
+        proposed = [r for r in records if r.get("proposed_scale")]
+        if proposed:
+            lines.append(f"- Of those, asked to confirm a scale from what the message described: **{len(proposed)}** "
+                         f"({', '.join(sorted({r['proposed_scale'] for r in proposed}))}); confirmed and used: "
+                         f"**{sum(bool(r.get('scale_observed')) for r in proposed)}**")
     checked = [r for r in ran if r.get("explanation_ok") is not None]
     if checked:
         lines.append(f"- Explanations matching the model output: **{sum(r['explanation_ok'] for r in checked)}/{len(checked)}**")

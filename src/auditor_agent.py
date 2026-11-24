@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, says_nothing_measured, scale_from_text, country_from_text, duration_from_text, type_stated_in_text)
+                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, SCALE_QUANTITY, mentions_month, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -19,7 +19,7 @@ How to work:
 - When the user wants to see, test or find a case, call find_case (or get_case for a specific id). The app shows each case you load as a card, so summarize what matters instead of repeating every field.
 - When the user describes a specific event of their own (a place, month, duration, or size such as wind speed or area), call classify_event with only the details they actually gave; pass stated_true_type only if they say what it really was. Then tell them which attributes were missing (filled with training defaults) and that adding them may change the prediction.
 - If classify_event returns need_more_details, the models did not run: ask the user for those details (one short question) and stop; never predict or hint at a type yourself. On their next message, call classify_event again with everything they've said so far (it runs then, even if they don't know the rest; if they say nothing was measured, pass nothing_measured=true).
-- "Nothing was measured" and "not said" are different. Pass nothing_measured=true only when the user says nothing was measured; then the models see the Unknown scale, as for recorded events without a measurement. If the user just doesn't say or doesn't know, leave both out: the app averages the models over the scales usually recorded for that place and month, and the case shows that mix. Never set magnitude_scale from the disaster the user describes (an earthquake, a flood), only from a quantity they say was measured.
+- "Nothing was measured" and "not said" are different. Pass nothing_measured=true only when the user says nothing was measured; then the models see the Unknown scale, as for recorded events without a measurement. If the user just doesn't say or doesn't know, leave both out: the app averages the models over the scales usually recorded for that place and month, and the case shows that mix. Never set magnitude_scale from the disaster the user describes (an earthquake, a flood), only from a quantity they say was measured. Nor from what they saw or felt (the house shaking, strong wind, extreme heat): leave it out, and the app asks them to confirm the quantity; if classify_event returns `observed`, ask exactly that.
 - To revisit a case already loaded or classified (another model, why not X, more detail), use get_case or explain_prediction with its id (EVENT-n or CASE-n). Call classify_event again only when the user changes or adds event details; otherwise you'd create a duplicate event.
 - Write for people: say "not given (default used)" and "% of the evidence", never raw field names like filled_in or share_pct.
 - If the question is about particular models, pass them in `models`; otherwise leave it out to use the models selected in the UI.
@@ -89,6 +89,7 @@ class SessionCases:
         self.message = ""  # the user's latest message as typed (no UI context), for checks done in code
         self.asked_details_on: Optional[str] = None  # the message on which classify_event asked for more details
         self.asked_event: Optional[Dict[str, Any]] = None  # what that message gave, kept for the user's answer
+        self.proposed_scale: Optional[Tuple[str, str]] = None  # (scale, words): what the user observed, to confirm
 
     def next_id(self) -> str:
         self.counter += 1
@@ -320,20 +321,47 @@ class AuditorTools:
                 if days is not None:
                     event["duration_days"] = days
                     notes.append(f"Duration {days:g} days was read from the message by the app.")
+            if event["start_month"] and text and not mentions_month(text):
+                # The LLM filled a month the user never gave (in the app, start_month=1 for "ที่ไทยในปี 2014 ...").
+                # Left out, the app asks for it and, if still unknown, reports January as a filled default.
+                event["start_month"] = None
+                notes.append("start_month was dropped: the user's words name no month.")
             if nothing_measured and not says_nothing_measured(text):
                 # The LLM read "I don't know" as "nothing measured" (seen in the app on "ไม่ทราบครับ"). That would
                 # feed the models the Unknown scale; not knowing is averaged over likely scales instead.
                 nothing_measured = False
                 notes.append("nothing_measured was ignored: the user didn't say nothing was measured.")
+            # What the user saw or felt ("บ้านสั่น") points at a measured quantity but is not one: the app proposes
+            # the scale and only the user's yes puts it into the models. The LLM may not do this on its own.
+            said_scale = scale_from_text(text)
+            seen = observed_scale(text)
+            proposed = session.proposed_scale if answering else None
+            confirmed = bool(proposed) and confirms(session.message)
+            observed = None
+            if (event["magnitude_scale"] not in (None, "Unknown") and not said_scale and seen
+                    and seen[0] == event["magnitude_scale"]):
+                if confirmed and proposed[0] == event["magnitude_scale"]:
+                    observed = proposed
+                else:
+                    notes.append(f"Magnitude scale {event['magnitude_scale']} was set aside: it came from what the "
+                                 f"user observed (\"{seen[1]}\"), which the user has not confirmed.")
+                    event["magnitude_scale"] = None
             if event["magnitude_scale"] in (None, "Unknown"):
                 event["magnitude_scale"] = None
-                scale = scale_from_text(text)
+                scale = said_scale
+                if not scale and confirmed and not says_nothing_measured(session.message):
+                    event["magnitude_scale"], observed = proposed[0], proposed
+                    notes.append(f"Magnitude scale {proposed[0]} comes from what the user observed "
+                                 f"(\"{proposed[1]}\"), confirmed by the user.")
+                elif proposed and not scale:
+                    notes.append(f"The user did not confirm {proposed[0]} from what they observed; "
+                                 "the scale stays not given.")
                 if scale:
                     # The message names what was measured. "Wind speed was recorded, no figure" is a scale with no
                     # value, not "nothing measured", whatever the LLM passed: the more specific evidence wins.
                     event["magnitude_scale"] = scale
                     notes.append(f"Magnitude scale {scale} was read from the message by the app.")
-                elif nothing_measured:
+                elif nothing_measured and not event["magnitude_scale"]:
                     event["magnitude_scale"] = "Unknown"  # a real answer, like the recorded cases with no measurement
             nothing_measured = nothing_measured and event["magnitude_scale"] == "Unknown"
             missing = missing_details(event, nothing_measured)
@@ -342,7 +370,22 @@ class AuditorTools:
                 # whatever the user's next message adds, the models run on it (no loop of questions).
                 session.asked_details_on = session.message
                 session.asked_event = dict(event)
+                if not event.get("start_month") and "the month it started" not in missing:
+                    missing.append("the month it started")  # asking anyway: a missing month becomes January
                 given = {k: v for k, v in event.items() if v not in (None, "", "Unknown")}
+                session.proposed_scale = seen if (seen and not event["magnitude_scale"]) else None
+                if session.proposed_scale:
+                    scale, words = session.proposed_scale
+                    return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
+                             "observed": {"words": words, "measured_quantity": SCALE_QUANTITY[scale]},
+                             "instruction": (
+                                 f"The models were NOT run. The user described \"{words}\", which is what "
+                                 f"{SCALE_QUANTITY[scale]} measures. In one short message in their language, ask them to "
+                                 f"confirm that the quantity measured was {SCALE_QUANTITY[scale]} (yes / no / not sure), "
+                                 "and for the other missing details listed. Name only the quantity, never a disaster "
+                                 "type, and do not guess the type. Say that if they are not sure, the app will average "
+                                 "over what is usually recorded there.")},
+                            "Asked to confirm what was observed", None, [])
                 return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
                          "instruction": (
                              "The models were NOT run. Ask the user, in one short question in their language, for the "
@@ -354,13 +397,18 @@ class AuditorTools:
                         "Asked for more details", None, [])
             session.asked_details_on = None
             session.asked_event = None
+            session.proposed_scale = None
             truth = args.get("stated_true_type")
             if truth and not type_stated_in_text(truth, text):
                 # The LLM guessed the type; the user never said it. A guess must not score the model.
-                notes.append(f"The true type was left unconfirmed: the user didn't say it was {truth}.")
+                # Not naming the type here: Gemini read the note back as "the type you expected" in the app.
+                notes.append("stated_true_type was dropped: the user never said what the event was. "
+                             "Do not name or hint at a type the user did not say.")
                 truth = None
             case = make_event_case(event, self.registry.feature_names, session.next_id(),
                                    truth=truth, class_names=self.classes)
+            if observed and event["magnitude_scale"] == observed[0]:
+                case["scale_observed"] = {"scale": observed[0], "words": observed[1]}
             session.add(case)
             audit = self.registry.audit_case(case, models)
             result = self._case_payload(audit)

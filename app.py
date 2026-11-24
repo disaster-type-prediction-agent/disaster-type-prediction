@@ -1087,6 +1087,10 @@ def render_audit_card(audit, tested_models, key_suffix):
             if case.get("filled"):
                 st.caption(f":orange[:material/info:] Not given, filled with training defaults: {', '.join(case['filled'])}. "
                            "Add them for a more reliable prediction.")
+            seen = case.get("scale_observed")
+            if seen:
+                st.caption(f":material/visibility: Magnitude scale **{seen['scale']}** comes from what you observed "
+                           f"(\"{seen['words']}\") and you confirmed it; no figure was given.")
             mix = next(iter(audit["models"].values()), {}).get("prediction", {}).get("scale_mix")
             if mix:
                 st.caption(":material/balance: What was measured was not given, so each model ran once per scale usually "

@@ -116,7 +116,7 @@ def test_app_agent_mode_shows_the_event_card_and_scores_it(app):
                               stated_true_type="Storm"))],
                   [chunk(types.Part(text="Storm, as you said."))]]
         with mock.patch("src.agent.make_gemini_client", return_value=FakeClient(script)):
-            at.chat_input[0].set_value("A storm hit Thailand, 120 kph winds; it was a storm").run()
+            at.chat_input[0].set_value("A storm hit Thailand in November, 120 kph winds; it was a storm").run()
     assert not at.exception, at.exception
     last = at.session_state["messages"][-1]
     assert last["content"] == "Storm, as you said." and "classify_event" in last["sources"]

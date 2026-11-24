@@ -66,7 +66,7 @@ def test_classify_event_recovers_the_scale_and_the_right_answer(tools, registry)
 
 def test_the_llm_reading_wins_over_the_keywords(tools, registry):
     session = SessionCases()
-    session.message = "temperatures were reported"
+    session.message = "temperatures were reported in November"
     _, _, audit, _ = tools.execute("classify_event", {"country": "Thailand", "magnitude_scale": "Kph", "start_month": 11},
                                    ["Random Forest"], session)
     assert audit["case"]["event"]["magnitude_scale"] == "Kph"

@@ -178,7 +178,8 @@ def test_a_guessed_true_type_does_not_score_the_model(tools):
     msg = "In the Philippines, wind speed was recorded in November over 2 days."
     result, _, audit, _ = classify(tools, SessionCases(), msg, country="Philippines", start_month=11,
                                    duration_days=2, magnitude_scale="Kph", stated_true_type="Storm")
-    assert audit["case"]["ground_truth_class"] is None and "unconfirmed" in result["note"]
+    assert audit["case"]["ground_truth_class"] is None and "stated_true_type was dropped" in result["note"]
+    assert "Storm" not in result["note"]  # naming it let Gemini call it "the type you expected"
 
     msg = "A typhoon hit the Philippines in November for 2 days; wind speed was recorded."
     result, _, audit, _ = classify(tools, SessionCases(), msg, country="Philippines", start_month=11,

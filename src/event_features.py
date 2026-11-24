@@ -18,7 +18,7 @@ value in data/processed/disaster_processed_feature_selected.csv exactly.
 import calendar
 import math
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DURATION_LOG_MAX = 8.098034756176071   # log1p(3,287 days), the longest event in the raw data
 MAGNITUDE_LOG_MAX = 16.38244832185021  # log1p(13,025,874), the largest magnitude in the raw data
@@ -119,9 +119,10 @@ def country_from_text(text: Optional[str], countries: List[str]) -> Optional[str
     return found.pop() if len(found) == 1 else None
 
 
-_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*-?\s*(hours?|hrs?|days?|weeks?|months?|ชั่วโมง|วัน|สัปดาห์|อาทิตย์|เดือน)(?![a-z])")
-_DAYS_PER = {"hour": 1 / 24, "hr": 1 / 24, "day": 1, "week": 7, "month": 30,
-             "ชั่วโมง": 1 / 24, "วัน": 1, "สัปดาห์": 7, "อาทิตย์": 7, "เดือน": 30}
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*-?\s*(?:กว่า\s*)?"
+                       r"(minutes?|mins?|hours?|hrs?|days?|weeks?|months?|นาที|ชั่วโมง|วัน|สัปดาห์|อาทิตย์|เดือน)(?![a-z])")
+_DAYS_PER = {"minute": 1 / 1440, "min": 1 / 1440, "hour": 1 / 24, "hr": 1 / 24, "day": 1, "week": 7, "month": 30,
+             "นาที": 1 / 1440, "ชั่วโมง": 1 / 24, "วัน": 1, "สัปดาห์": 7, "อาทิตย์": 7, "เดือน": 30}
 
 
 def duration_from_text(text: Optional[str]) -> Optional[float]:
@@ -133,6 +134,22 @@ def duration_from_text(text: Optional[str]) -> Optional[float]:
         return None
     n, unit = found.pop()
     return round(n * _DAYS_PER[unit], 2)
+
+
+# A month the message names: English names and abbreviations, Thai names (มกรา... with or without คม/ยน/พันธ์)
+# and abbreviations (ม.ค.), "month 5"/"เดือน 5", and numeric dates. Used to drop a month the LLM made up: in the
+# app, Gemini passed start_month=1 for "ที่ไทยในปี 2014 ..." which names no month, so the app never asked for it.
+_MONTH = re.compile(
+    r"(?<![a-z])(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?![a-z])"
+    r"|มกรา|กุมภา|มีนา|เมษา|พฤษภา|มิถุนา|กรกฎา|สิงหา|กันยา|ตุลา|พฤศจิกา|ธันวา"
+    r"|ม\.ค|ก\.พ|มี\.ค|เม\.ย|พ\.ค|มิ\.ย|ก\.ค|ส\.ค|ก\.ย|ต\.ค|พ\.ย|ธ\.ค"
+    r"|(?:month|เดือน(?:ที่)?)\s*(?:0?[1-9]|1[0-2])(?!\d)|(?<!\d)(?:0?[1-9]|1[0-2])[/-](?:19|20)?\d{2}(?!\d)"
+    r"|(?:19|20)\d{2}-(?:0[1-9]|1[0-2])(?!\d)")
+
+
+def mentions_month(text: Optional[str]) -> bool:
+    """Whether the message names a month at all (which one is the LLM's reading; this only checks there is one)."""
+    return bool(_MONTH.search((text or "").lower()))
 
 
 # Words that SAY what an event was (the disaster type itself), English and Thai. Unlike the class words the
@@ -180,6 +197,61 @@ def says_nothing_measured(text: Optional[str]) -> bool:
     nothing_measured feeds the models the Unknown scale, which reads as Landslide or Epidemic. In the app,
     Gemini passed it for a bare "ไม่ทราบครับ" (I don't know), so it counts only when the words say so."""
     return bool(_NOTHING_MEASURED.search((text or "").lower()))
+
+
+# What a person can SEE or FEEL of the quantity a scale measures, without a number or the name of the quantity:
+# "บ้านสั่น" is the shaking a seismometer records (Moment Magnitude), "ลมแรง" the wind an anemometer records.
+# Never disaster names (TYPE_WORDS; a test checks it), and never effects that any hazard could cause
+# ("houses collapsed", "crops died"). The app only PROPOSES the scale and the user must confirm it, so the
+# value the models see comes from the user, not from this table or the LLM. Vaccinated has no observation.
+OBSERVATION_WORDS = {
+    "Moment Magnitude": [
+        r"(?:ground|earth|house|houses|home|building|buildings|walls?|floor|windows?)\s+(?:was\s+|were\s+|started\s+|began\s+)?"
+        r"(?:shook|shaking|shake|swayed|swaying|trembled|trembling)",
+        r"(?:shaking|trembling) (?:of the )?(?:ground|earth|house|building)s?",
+        r"(?:บ้าน|พื้น|ตึก|อาคาร|แผ่นดิน|ผนัง|หน้าต่าง)(?:ก็)?(?:สั่น|โยก)", r"สั่นสะเทือน", r"สั่นไหว"],
+    "Kph": [
+        r"(?:strong|high|heavy|violent|fierce|powerful) winds?", r"winds? (?:blew|tore|howled|ripped)",
+        r"(?:roofs?|trees?) (?:were |was )?(?:blown|torn) (?:off|down|away)",
+        r"ลมแรง", r"ลมพัด", r"ลมกระโชก", r"ลมกรรโชก", r"หลังคา\S{0,6}ปลิว", r"ลมหอบ"],
+    "°C": [
+        r"(?:very|extremely|unbearably|scorching|blistering) (?:hot|cold)", r"scorching", r"bitter(?:ly)? cold",
+        r"freezing (?:cold|weather|temperatures?)", r"(?:extreme|intense) (?:heat|cold)",
+        r"ร้อนมาก", r"ร้อนจนทน", r"อากาศร้อน", r"หนาวมาก", r"หนาวเหน็บ", r"อากาศหนาว", r"หนาวจนทน"],
+    "Km2": [
+        r"(?:large|wide|vast|huge|big) (?:area|region|stretch)", r"(?:many|several|dozens of|hundreds of) "
+        r"(?:villages|districts|provinces|towns)", r"(?:whole|entire) (?:province|district|region|valley)",
+        r"หลาย(?:หมู่บ้าน|ตำบล|อำเภอ|จังหวัด)", r"ทั้ง(?:จังหวัด|อำเภอ|ตำบล|หมู่บ้าน)", r"พื้นที่กว้าง", r"เป็นบริเวณกว้าง"],
+}
+_OBSERVATION_PATTERNS = {scale: re.compile("|".join(words)) for scale, words in OBSERVATION_WORDS.items()}
+
+# What the quantity is, for the question the app asks (in the LLM's words to the user).
+SCALE_QUANTITY = {"Moment Magnitude": "the size of the ground shaking (Richter/moment magnitude)",
+                  "Kph": "wind speed", "°C": "temperature", "Km2": "the affected area", "Vaccinated": "people vaccinated"}
+
+
+def observed_scale(text: Optional[str]) -> Optional[Tuple[str, str]]:
+    """(scale, the words matched) when the message describes seeing or feeling exactly one measured quantity.
+
+    For a message that names no scale ("บ้านสั่นอยู่ 10 นาที"): the app asks the user to confirm the scale.
+    None when it describes none, or quantities of several scales (then which one was measured is unclear)."""
+    low = (text or "").lower()
+    found = {scale: m.group(0) for scale, pattern in _OBSERVATION_PATTERNS.items() if (m := pattern.search(low))}
+    return next(iter(found.items())) if len(found) == 1 else None
+
+
+# The user's answer to "was it X that was measured?". The first yes or no word decides: "ใช่ แต่ไม่รู้เดือน"
+# confirms, "ไม่แน่ใจ" does not. Thai "ไม่ใช่" contains "ใช่", hence the look-behind.
+_YES_NO = re.compile(
+    r"(?P<no>ไม่ใช่|ไม่แน่ใจ|ไม่ทราบ|ไม่รู้|ไม่ถูก|ไม่น่า|(?<![a-z])(?:no|nope|not sure|unsure|don'?t know|do not know|wrong|not really)(?![a-z]))"
+    r"|(?P<yes>(?<!ไม่)ใช่|ถูกต้อง|(?<!ไม่)ถูก(?:แล้ว|ครับ|ค่ะ)|ประมาณนั้น|น่าจะ(?:ใช่|ถูก)"
+    r"|(?<![a-z])(?:yes|yeah|yep|yup|correct|right|exactly|sure|that's it|i think so)(?![a-z]))")
+
+
+def confirms(text: Optional[str]) -> bool:
+    """Whether an answer confirms what the app proposed: its first yes/no word is a yes."""
+    m = _YES_NO.search((text or "").lower())
+    return bool(m and m.group("yes"))
 
 
 _NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
@@ -326,6 +398,9 @@ def case_attribute_values(case: Dict[str, Any], prediction: Optional[Dict[str, A
         values["Magnitude scale"] = "not given" + (
             " (models averaged over the scales usually recorded there: "
             + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix) + ")" if mix else "")
+    seen = case.get("scale_observed")
+    if seen:
+        values["Magnitude scale"] += f" (from what the user observed, \"{seen['words']}\", confirmed by the user)"
     return values
 
 
