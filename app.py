@@ -1165,6 +1165,7 @@ def render_audit_card(audit, tested_models, key_suffix):
                     placeholder="What type was it really?",
                     label_visibility="collapsed",
                     key=f"truth_{case['case_id']}_{key_suffix}",
+                    filter_mode=None,  # no typing: on a phone, the keyboard it opened closed the list
                 )
                 if st.button("Confirm", icon=":material/check:", key=f"confirm_{case['case_id']}_{key_suffix}",
                              disabled=picked is None, help="Adds this event to the session scoreboard"):
@@ -1238,6 +1239,7 @@ def render_composer(placeholder):
                     on_change=sync_model_picker,
                     label_visibility="collapsed",
                     width=150,
+                    filter_mode=None,  # no typing: on a phone, the keyboard it opened closed the list
                 )
 
         if st.session_state.comparison_mode:
@@ -1561,6 +1563,7 @@ with st.sidebar:
             "Disaster type",
             ["All categories"] + registry.class_names,
             label_visibility="collapsed",
+            filter_mode=None,  # no typing: on a phone, the keyboard it opened closed the list
         )
         target_cat = None if cat_select == "All categories" else cat_select
         if st.button("Run", icon=":material/play_arrow:", help="The model gets a test case's recorded features"):
@@ -1583,6 +1586,7 @@ with st.sidebar:
             "LLM provider",
             ["Google Gemini", "Anthropic Claude"],
             index=0 if is_gemini else 1,
+            filter_mode=None,  # no typing: on a phone, the keyboard it opened closed the list
         )
         if prov_choice != st.session_state.api_provider:
             st.session_state.api_provider = prov_choice
