@@ -282,6 +282,16 @@ def confirms(text: Optional[str]) -> bool:
     return bool(m and m.group("yes"))
 
 
+_UNSURE = re.compile(r"ไม่แน่ใจ|ไม่ทราบ|ไม่รู้|(?<![a-z])(?:not sure|unsure|don'?t know|do not know|no idea)(?![a-z])")
+
+
+def denies(text: Optional[str]) -> bool:
+    """Whether an answer rules the proposal out ("ไม่ใช่", "no"), rather than not knowing ("ไม่แน่ใจ")."""
+    low = (text or "").lower()
+    m = _YES_NO.search(low)
+    return bool(m and m.group("no")) and not _UNSURE.search(low)
+
+
 _NO_MAGNITUDE = re.compile(r"\b(?:unknown|no|without an?|unrecorded|unspecified) magnitude\b"
                            r"|\bmagnitude (?:was |is )?(?:unknown|not (?:recorded|given|known|reported))\b")
 
@@ -426,6 +436,8 @@ def case_attribute_values(case: Dict[str, Any], prediction: Optional[Dict[str, A
         values["Magnitude scale"] = "not given" + (
             " (models averaged over the scales usually recorded there: "
             + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix) + ")" if mix else "")
+    for scale in case.get("scale_ruled_out") or []:
+        values["Magnitude scale"] += f" ({scale} ruled out by the user)"
     seen = case.get("scale_observed")
     if seen:
         values["Magnitude scale"] += f" (from what the user observed, \"{seen['words']}\", confirmed by the user)"

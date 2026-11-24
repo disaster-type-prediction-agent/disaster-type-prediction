@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text)
+                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, denies, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -351,7 +351,7 @@ class AuditorTools:
             seen = observed_scale(text)
             proposed = session.proposed_scale if answering else None
             confirmed = bool(proposed) and confirms(session.message)
-            observed = None
+            observed = ruled_out = None
             if (event["magnitude_scale"] not in (None, "Unknown") and not said_scale and seen
                     and seen[0] == event["magnitude_scale"]):
                 if confirmed and proposed[0] == event["magnitude_scale"]:
@@ -367,6 +367,11 @@ class AuditorTools:
                     event["magnitude_scale"], observed = proposed[0], proposed
                     notes.append(f"Magnitude scale {proposed[0]} comes from what the user observed "
                                  f"(\"{proposed[1]}\"), confirmed by the user.")
+                elif proposed and not scale and denies(session.message):
+                    # "ไม่ใช่" says what it was not: that scale leaves the averaging. "ไม่แน่ใจ" says nothing.
+                    ruled_out = proposed[0]
+                    notes.append(f"The user said the quantity was not {proposed[0]}; the scale stays not given and "
+                                 f"{proposed[0]} is left out of the averaging.")
                 elif proposed and not scale:
                     notes.append(f"The user did not confirm {proposed[0]} from what they observed; "
                                  "the scale stays not given.")
@@ -421,6 +426,8 @@ class AuditorTools:
                                    truth=truth, class_names=self.classes)
             if observed and event["magnitude_scale"] == observed[0]:
                 case["scale_observed"] = {"scale": observed[0], "words": observed[1]}
+            if ruled_out and case["scale_not_given"]:
+                case["scale_ruled_out"] = [ruled_out]
             session.add(case)
             audit = self.registry.audit_case(case, models)
             result = self._case_payload(audit)

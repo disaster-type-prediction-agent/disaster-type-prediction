@@ -159,3 +159,31 @@ def test_the_source_line_says_the_app_wrote_the_question():
     answered = {**step, "result": {"status": "classified"}}
     assert agent_sources([answered], "Random Forest predicted Drought.", "Gemini").startswith("Based on 1 tool result")
     assert agent_sources([], "hi", "Gemini").startswith("No tools used")
+
+
+def test_no_and_not_sure_are_different_answers():
+    from src.event_features import denies
+    for no in ["ไม่ใช่ครับ", "ไม่ใช่", "no", "Nope, it wasn't", "wrong", "ไม่ถูกครับ"]:
+        assert denies(no), no
+    for not_no in ["ไม่แน่ใจครับ", "ไม่ทราบ", "no idea", "I don't know", "not sure", "no, I'm not sure", "ใช่ครับ", None]:
+        assert not denies(not_no), not_no
+
+
+def test_no_leaves_the_rejected_scale_out_of_the_averaging(tools, registry):
+    """Live app: after "ไม่ใช่ครับ" the mix still held Moment Magnitude 3%, the scale the user had just rejected."""
+    session = SessionCases()
+    classify(tools, session, EXAMPLE, country="Thailand")
+    result, _, audit, _ = classify(tools, session, "ไม่ใช่ครับ", country="Thailand")
+    case = audit["case"]
+    assert case["scale_not_given"] and case["scale_ruled_out"] == ["Moment Magnitude"]
+    mix = audit["models"]["Random Forest"]["prediction"]["scale_mix"]
+    assert "Moment Magnitude" not in [m["scale"] for m in mix] and abs(sum(m["weight"] for m in mix) - 1) < 0.01
+    assert "left out of the averaging" in result["note"]
+    assert "Moment Magnitude ruled out by the user" in result["attributes"]["Magnitude scale"]
+
+    # "ไม่แน่ใจ" rules nothing out: Moment Magnitude stays a possibility.
+    session = SessionCases()
+    classify(tools, session, EXAMPLE, country="Thailand")
+    _, _, audit, _ = classify(tools, session, "ไม่แน่ใจครับ", country="Thailand")
+    assert "scale_ruled_out" not in audit["case"]
+    assert "Moment Magnitude" in [m["scale"] for m in audit["models"]["Random Forest"]["prediction"]["scale_mix"]]

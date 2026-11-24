@@ -37,7 +37,11 @@ class ModelRegistry:
         if not case.get("scale_not_given"):
             return None
         event = case.get("event") or {}
-        return self.scale_prior.weights(event.get("country"), event.get("region"), event.get("start_month"))
+        weights = self.scale_prior.weights(event.get("country"), event.get("region"), event.get("start_month"))
+        # A scale the user ruled out ("ไม่ใช่" to the app's proposal) is not one of the possibilities.
+        kept = {s: w for s, w in weights.items() if s not in (case.get("scale_ruled_out") or [])}
+        total = sum(kept.values())
+        return {s: w / total for s, w in kept.items()} if total else weights
 
     def predict_case(self, case: Dict[str, Any], model_name: str) -> Tuple[Dict[str, Any], Dict[str, float]]:
         """One model's prediction on a case, plus the feature record to explain it with.

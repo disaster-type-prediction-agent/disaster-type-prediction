@@ -1090,9 +1090,11 @@ def render_audit_card(audit, tested_models, key_suffix):
                            f"(\"{seen['words']}\") and you confirmed it; no figure was given.")
             mix = next(iter(audit["models"].values()), {}).get("prediction", {}).get("scale_mix")
             if mix:
+                ruled = case.get("scale_ruled_out")
                 st.caption(":material/balance: What was measured was not given, so each model ran once per scale usually "
                            "recorded there and the results were averaged: "
-                           + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix) + ".")
+                           + ", ".join(f"{m['scale']} {m['weight']:.0%}" for m in mix)
+                           + (f" ({', '.join(ruled)} left out: you said it was not that)" if ruled else "") + ".")
         else:
             st.markdown(f":material/description: **Case {case['case_id']}** · ground truth **{truth}**")
             st.caption(
