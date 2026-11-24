@@ -144,3 +144,38 @@ def test_typed_test_scores_the_model_and_how_well_gemini_read_the_message(app, r
     assert rec["source"] == "Typed test" and rec["from_case"] == case["case_id"] and rec["true_type"] == "Storm"
     assert rec["attributes_read_correctly"] == 5, "5 of 6 attributes read correctly (the month was wrong)"
     assert at.session_state["typed_test"] is None
+
+
+def test_all_models_busy_waits_and_tries_again(tools):
+    """In the app: 503 on one model, then 504 DEADLINE_EXCEEDED on the last. A second pass after a short wait."""
+    with mock.patch("src.auditor_agent.time.sleep") as sleep:
+        events, _, client = run(tools, [server_error(503), server_error(504), [chunk(types.Part(text="Back."))]])
+    sleep.assert_called_once()
+    assert [m for m, _ in client.requests] == ["model-a", "model-b", "model-a"]
+    assert "".join(p for k, p in events if k == "text") == "Back."
+
+
+def test_still_busy_names_each_model_and_says_nothing_ran(tools):
+    with mock.patch("src.auditor_agent.time.sleep"):
+        events, _, _ = run(tools, [server_error(503), server_error(504)] * 2)
+    kind, message = events[-1]
+    assert kind == "error"
+    assert "model-a: 503" in message and "model-b: 504" in message and "{" not in message, "short codes, no JSON body"
+    assert "Nothing was run on this message" in message
+
+
+def test_quota_on_one_model_is_not_retried(tools):
+    with mock.patch("src.auditor_agent.time.sleep") as sleep:
+        events, _, client = run(tools, [server_error(429), server_error(504)])
+    sleep.assert_not_called()
+    assert len(client.requests) == 2 and "model-a: 429" in events[-1][1]
+
+
+def test_busy_after_the_models_ran_says_their_results_stand(tools):
+    with mock.patch("src.auditor_agent.time.sleep"):
+        events, _, _ = run(tools, [
+            [chunk(call("classify_event", country="thailand", start_month=11.0, duration_days=3.0,
+                        magnitude_value=120.0, magnitude_scale="Kph"))],
+        ] + [server_error(504)] * 4, session=SessionCases())
+    assert any(k == "tool" for k, _ in events)
+    assert "results above still stand" in events[-1][1]

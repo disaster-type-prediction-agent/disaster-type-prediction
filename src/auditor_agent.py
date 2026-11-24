@@ -1,6 +1,7 @@
 """Tool-using auditor agents (Claude or Gemini): the LLM decides which registry tools to call and answers from their results."""
 import json
 import re
+import time
 from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
@@ -12,6 +13,21 @@ _UNIT_DAYS = {"minutes": 1 / 1440, "hours": 1 / 24, "days": 1, "weeks": 7, "mont
 QUOTE_RULE = ("The user's own words that state this value, copied exactly from their message in their language "
               "(e.g. \"5月\", \"tembló\"). A value with no quote that is in the user's words is dropped.")
 MAX_TOOL_ROUNDS = 6
+BUSY_RETRY_SECONDS = 3  # every model busy (503/504/timeout): wait this long, then try them all once more
+
+
+def _short_error(e: Exception) -> str:
+    """'504 DEADLINE_EXCEEDED' rather than the whole JSON body Gemini sends back."""
+    code, status = getattr(e, "code", None), getattr(e, "status", None)
+    if code:
+        return f"{code} {status}" if status else str(code)
+    return "timed out" if "timed out" in str(e).lower() else type(e).__name__
+
+
+def _is_busy(e: Exception) -> bool:
+    """Gemini overloaded or slow (worth trying again), as opposed to a quota or a bad request."""
+    code = getattr(e, "code", None)
+    return code is None or code >= 500
 MAX_JSON_RETRIES = 2
 
 SYSTEM_PROMPT = """You are the Disaster Auditor, an expert in natural-disaster classification, ML model evaluation, and explainable AI (SHAP).
@@ -855,34 +871,45 @@ class GeminiAuditorAgent:
         models = gemini_models()
 
         for rounds in range(1, MAX_TOOL_ROUNDS + 2):
-            parts, last_err = None, None
-            for model_name in models:  # fall back to the next model on 503/429 (each has its own quota)
-                streamed, got = 0, []
-                try:
-                    for chunk in client.models.generate_content_stream(model=model_name, contents=history, config=config):
-                        for part in (chunk.candidates[0].content.parts if chunk.candidates and chunk.candidates[0].content else None) or []:
-                            got.append(part)
-                            if part.text and not part.thought:
-                                streamed += len(part.text)
-                                yield "text", part.text
-                    parts = got
+            parts, failures = None, []
+            for attempt in range(2):
+                if attempt:
+                    # Every model was busy: a short wait usually clears a demand spike (seen in the app: a 504
+                    # on the last model after 503s on the others).
+                    time.sleep(BUSY_RETRY_SECONDS)
+                failures = []
+                for model_name in models:  # fall back to the next model on 503/429 (each has its own quota)
+                    streamed, got = 0, []
+                    try:
+                        for chunk in client.models.generate_content_stream(model=model_name, contents=history, config=config):
+                            for part in (chunk.candidates[0].content.parts if chunk.candidates and chunk.candidates[0].content else None) or []:
+                                got.append(part)
+                                if part.text and not part.thought:
+                                    streamed += len(part.text)
+                                    yield "text", part.text
+                        parts = got
+                        break
+                    except errors.APIError as e:
+                        failures.append((model_name, e))
+                        if streamed:
+                            yield "retract", streamed  # this attempt's partial text: the next model starts over
+                        if e.code in (400, 401, 403) and "key" in str(e).lower():
+                            yield "error", "Invalid Gemini API key. Please check the key in the sidebar settings."
+                            return
+                    except Exception as e:  # timeouts, connection errors
+                        failures.append((model_name, e))
+                        if streamed:
+                            yield "retract", streamed
+                if parts is not None or not all(_is_busy(e) for _, e in failures):
                     break
-                except errors.APIError as e:
-                    last_err = e
-                    if streamed:
-                        yield "retract", streamed  # this attempt's partial text: the next model starts over
-                    if e.code in (400, 401, 403) and "key" in str(e).lower():
-                        yield "error", "Invalid Gemini API key. Please check the key in the sidebar settings."
-                        return
-                except Exception as e:  # timeouts, connection errors
-                    last_err = e
-                    if streamed:
-                        yield "retract", streamed
             if parts is None:
-                if getattr(last_err, "code", None) == 429:
+                if all(getattr(e, "code", None) == 429 for _, e in failures):
                     yield "error", "Gemini's free quota is used up for now. Wait a minute, or switch off agent mode in Settings."
                 else:
-                    yield "error", f"Gemini didn't answer ({last_err}). Please try again."
+                    tried = "; ".join(f"{m}: {_short_error(e)}" for m, e in failures)
+                    ran = ("The models' results above still stand; only Gemini's explanation is missing."
+                           if rounds > 1 else "Nothing was run on this message; please send it again in a minute.")
+                    yield "error", f"Gemini is busy and every model failed ({tried}). {ran}"
                 return
 
             calls = [p.function_call for p in parts if p.function_call]
