@@ -230,6 +230,34 @@ SCALE_QUANTITY = {"Moment Magnitude": "the size of the ground shaking (Richter/m
                   "Kph": "wind speed", "°C": "temperature", "Km2": "the affected area", "Vaccinated": "people vaccinated"}
 
 
+# The confirmation question is written here, not by the LLM: in the app Gemini turned "the size of the ground
+# shaking" into "ขนาดของแผ่นดินไหว" (the size of the earthquake), naming the type before the models ran.
+_QUANTITY_TH = {"Moment Magnitude": "ขนาดของแรงสั่นสะเทือน (มาตราริกเตอร์/แมกนิจูด)", "Kph": "ความเร็วลม",
+                "°C": "อุณหภูมิ", "Km2": "ขนาดพื้นที่ที่ได้รับผลกระทบ", "Vaccinated": "จำนวนคนที่ได้รับวัคซีน"}
+_OTHER_ASKS = {"where it happened (country)": ("เกิดที่ประเทศไหน", "which country it happened in"),
+               "the month it started": ("เริ่มเดือนไหน", "which month it started"),
+               "how long it lasted": ("นานเท่าไร", "how long it lasted")}
+
+
+def confirm_question(scale: str, words: str, missing: List[str], text: Optional[str]) -> str:
+    """The exact question asking the user to confirm the quantity they described, in the message's language."""
+    others = [_OTHER_ASKS[m] for m in missing if m in _OTHER_ASKS]
+    if re.search(r"[\u0e00-\u0e7f]", text or ""):
+        q = f"จากที่เล่าว่า \"{words}\" สิ่งที่วัดได้ของเหตุการณ์นี้คือ{_QUANTITY_TH[scale]}ใช่ไหมครับ (ใช่ / ไม่ใช่ / ไม่แน่ใจ)"
+        if others:
+            q += " และ" + " และ".join(th for th, _ in others) + "ครับ"
+        return q + "\n\nถ้าไม่แน่ใจหรือไม่ทราบ ตอบได้เลยครับ ระบบจะเฉลี่ยจากสิ่งที่มักบันทึกในพื้นที่นั้นแทน"
+    q = f"You described \"{words}\". Was the quantity measured for this event {SCALE_QUANTITY[scale]}? (yes / no / not sure)"
+    if others:
+        q += " Also, " + " and ".join(en for _, en in others) + "?"
+    return q + "\n\nIf you're not sure or don't know, just say so: the app will average over what is usually recorded there."
+
+
+def names_a_type(text: Optional[str]) -> bool:
+    """Whether a text names any disaster type (TYPE_WORDS), e.g. a question that should only name a quantity."""
+    return any(type_stated_in_text(cls, text) for cls in TYPE_WORDS)
+
+
 def observed_scale(text: Optional[str]) -> Optional[Tuple[str, str]]:
     """(scale, the words matched) when the message describes seeing or feeling exactly one measured quantity.
 

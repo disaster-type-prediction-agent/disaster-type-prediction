@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, SCALE_QUANTITY, mentions_month, country_from_text, duration_from_text, type_stated_in_text)
+                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, SCALE_QUANTITY, mentions_month, confirm_question, names_a_type, country_from_text, duration_from_text, type_stated_in_text)
 
 MODEL = "claude-opus-5-5"
 MAX_TOOL_ROUNDS = 6
@@ -376,15 +376,14 @@ class AuditorTools:
                 session.proposed_scale = seen if (seen and not event["magnitude_scale"]) else None
                 if session.proposed_scale:
                     scale, words = session.proposed_scale
+                    question = confirm_question(scale, words, missing, session.message)
                     return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
                              "observed": {"words": words, "measured_quantity": SCALE_QUANTITY[scale]},
+                             "question": question,
                              "instruction": (
-                                 f"The models were NOT run. The user described \"{words}\", which is what "
-                                 f"{SCALE_QUANTITY[scale]} measures. In one short message in their language, ask them to "
-                                 f"confirm that the quantity measured was {SCALE_QUANTITY[scale]} (yes / no / not sure), "
-                                 "and for the other missing details listed. Name only the quantity, never a disaster "
-                                 "type, and do not guess the type. Say that if they are not sure, the app will average "
-                                 "over what is usually recorded there.")},
+                                 "The models were NOT run. Reply with exactly the text in `question`, word for word, "
+                                 "and nothing else: no disaster type, no guess. (A reply naming a type is replaced "
+                                 "by that question.)")},
                             "Asked to confirm what was observed", None, [])
                 return ({"status": "need_more_details", "missing": missing, "given_so_far": given,
                          "instruction": (
@@ -752,6 +751,7 @@ class GeminiAuditorAgent:
         history.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
         models = gemini_models()
 
+        question = None  # the app's own question this turn (classify_event asked to confirm an observation)
         for rounds in range(1, MAX_TOOL_ROUNDS + 2):
             parts, last_err = None, None
             for model_name in models:  # fall back to the next model on 503/429 (each has its own quota)
@@ -776,6 +776,11 @@ class GeminiAuditorAgent:
                     last_err = e
                     if streamed:
                         yield "retract", streamed
+            if parts is None and question:
+                # Gemini failed after the app decided to ask: the question needs no LLM, so ask it anyway.
+                yield "text", question
+                history.append(types.Content(role="model", parts=[types.Part(text=question)]))
+                return
             if parts is None:
                 if getattr(last_err, "code", None) == 429:
                     yield "error", "Gemini's free quota is used up for now. Wait a minute, or switch off agent mode in Settings."
@@ -783,8 +788,15 @@ class GeminiAuditorAgent:
                     yield "error", f"Gemini didn't answer ({last_err}). Please try again."
                 return
 
-            history.append(types.Content(role="model", parts=parts))
             calls = [p.function_call for p in parts if p.function_call]
+            reply = "".join(p.text for p in parts if p.text and not p.thought)
+            if not calls and question and names_a_type(reply):
+                # The prompt said "never a type"; in the app Gemini still wrote "ขนาดของแผ่นดินไหว". Code decides.
+                if streamed:
+                    yield "retract", streamed
+                yield "text", question
+                parts = [types.Part(text=question)]
+            history.append(types.Content(role="model", parts=parts))
             if not calls:
                 return
             if rounds > MAX_TOOL_ROUNDS:
@@ -806,5 +818,6 @@ class GeminiAuditorAgent:
             if rounds == MAX_TOOL_ROUNDS:
                 responses.append(types.Part(text="Tool budget for this question is used up. Answer now with what you have."))
             history.append(types.Content(role="user", parts=responses))
+            question = next((r.get("question") for r, _ in outcomes if isinstance(r, dict) and r.get("question")), question)
             for ev in events:
                 yield "tool", ev

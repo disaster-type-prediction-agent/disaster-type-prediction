@@ -104,3 +104,54 @@ def test_a_month_the_user_never_named_is_dropped(tools):
     session = SessionCases()
     result, _, audit, _ = classify(tools, session, EXAMPLE, country="Thailand", start_month=1, duration_days=0.01)
     assert audit is None and "the month it started" in result["missing"] and "start_month" not in result["given_so_far"]
+
+
+def test_the_confirmation_question_is_written_by_the_app():
+    from src.event_features import confirm_question, names_a_type
+    th = confirm_question("Moment Magnitude", "บ้านสั่น", ["the month it started"], EXAMPLE)
+    assert "บ้านสั่น" in th and "แรงสั่นสะเทือน" in th and "เดือนไหน" in th and not names_a_type(th)
+    en = confirm_question("Kph", "strong winds", [], "strong winds in Manila")
+    assert "wind speed" in en and not names_a_type(en)
+    for scale in ("Moment Magnitude", "Kph", "°C", "Km2"):
+        for text in (EXAMPLE, "in English"):
+            assert not names_a_type(confirm_question(scale, "x", ["where it happened (country)"], text)), scale
+    assert names_a_type("เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ") and not names_a_type("ใช่ไหมครับ")
+
+
+def test_a_reply_naming_the_type_is_replaced_by_the_apps_question(tools):
+    """Live app: Gemini asked "เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ", naming the type before the models ran."""
+    from google.genai import types
+    from tests.test_gemini_agent import call, chunk, run
+
+    session = SessionCases()
+    session.message = EXAMPLE
+    events, history, _ = run(tools, [[chunk(call("classify_event", country="Thailand", duration_days=0.007))],
+                                     [chunk(types.Part(text="เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ"))]],
+                             question=EXAMPLE, session=session)
+    text = ""
+    for kind, payload in events:
+        text = text + payload if kind == "text" else text[:-payload] if kind == "retract" else text
+    tool = next(p for k, p in events if k == "tool")
+    assert text == tool["result"]["question"] and not tool["result"]["question"].count("แผ่นดินไหว")
+    assert history[-1].parts[0].text == text  # the transcript holds what the user saw
+
+    # A reply that names no type is left as Gemini wrote it.
+    session = SessionCases()
+    session.message = EXAMPLE
+    events, _, _ = run(tools, [[chunk(call("classify_event", country="Thailand"))],
+                               [chunk(types.Part(text="บ้านสั่นนี้ วัดเป็นแรงสั่นสะเทือนใช่ไหมครับ"))]],
+                       question=EXAMPLE, session=session)
+    assert "".join(p for k, p in events if k == "text") == "บ้านสั่นนี้ วัดเป็นแรงสั่นสะเทือนใช่ไหมครับ"
+
+
+def test_the_question_is_asked_even_when_gemini_fails(tools):
+    """Live run: Gemini timed out right after classify_event asked, and the user saw only an error."""
+    from tests.test_gemini_agent import call, chunk, run, server_error
+
+    session = SessionCases()
+    session.message = EXAMPLE
+    events, history, _ = run(tools, [[chunk(call("classify_event", country="Thailand"))], server_error(), server_error()],
+                             question=EXAMPLE, session=session)
+    tool = next(p for k, p in events if k == "tool")
+    assert "".join(p for k, p in events if k == "text") == tool["result"]["question"]
+    assert not [p for k, p in events if k == "error"] and history[-1].role == "model"
