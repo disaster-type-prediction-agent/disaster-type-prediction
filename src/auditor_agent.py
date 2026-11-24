@@ -385,6 +385,11 @@ class AuditorTools:
                 event["start_month"] = None
                 notes.append("start_month was dropped: the user's words name no month.")
             value = event["magnitude_value"]
+            if value == 0 and 0 not in _numbers(text):
+                # "พื้นที่…แต่ไม่มีการระบุตัวเลข" (no figure) came back as magnitude_value 0 (typed eval CASE-1225):
+                # a zero the user never wrote is "no figure", in any language.
+                notes.append("magnitude_value 0 was dropped: the user gave no figure.")
+                event["magnitude_value"] = value = None
             scale_quote = args.get("scale_quote") or ""
             if (not readable and value is not None and value != (session.asked_event or {}).get("magnitude_value")
                     and not (quoted(scale_quote, text) and value in _numbers(scale_quote))):

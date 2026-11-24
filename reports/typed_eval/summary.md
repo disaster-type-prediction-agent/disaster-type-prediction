@@ -17,7 +17,7 @@
 - Attributes read correctly overall: **98.8%**
 - Asked the user for more details first (too little given): **18/80**
 - Explanations matching the model output: **79/80**
-- Gemini requests per case: 4.4 on average (writer + agent rounds + fallbacks)
+- Gemini requests per case: 2.5 on average (writer + agent rounds + fallbacks)
 
 | Attribute | Read correctly |
 |---|---|

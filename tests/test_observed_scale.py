@@ -312,3 +312,23 @@ def test_a_figure_needs_the_measurement_words_and_nothing_measured_needs_readabl
     # Not taken as "nothing measured": the scale is still missing, so the app asks instead of running on Unknown.
     assert audit is None and "magnitude_scale" not in result["given_so_far"]
     assert "nothing_measured was ignored" in result.get("note", "") or result["status"] == "need_more_details"
+
+
+def test_typed_eval_regressions_after_the_quote_checks(tools):
+    """Typed eval rerun: "1,675 วัน" was read as 675 days; "ไม่มีการระบุตัวเลข" came back as magnitude_value 0."""
+    msg = "เกิดเหตุการณ์ในประเทศมอริเตาเนีย ทวีปแอฟริกา ตั้งแต่เดือนมิถุนายน เป็นเวลานานถึง 1,675 วัน โดยมีการบันทึกพื้นที่ได้รับผลกระทบด้วย"
+    assert duration_from_text(msg) == 1675
+    _, _, audit, _ = classify(tools, SessionCases(), msg, country="Mauritania", start_month=6, duration_days=1675,
+                              magnitude_scale="Km2")
+    assert audit["case"]["event"]["duration_days"] == 1675
+
+    msg = "เกิดเหตุการณ์ขึ้นที่ประเทศเอสวาตินีในทวีปแอฟริกาเมื่อเดือนกรกฎาคมที่ผ่านมา โดยมีการบันทึกพื้นที่ได้รับผลกระทบแต่ไม่มีการระบุตัวเลข"
+    result, _, audit, _ = classify(tools, SessionCases(), msg, country="Eswatini", start_month=7,
+                                   magnitude_scale="Km2", magnitude_value=0)
+    assert (audit or {}).get("case", {}).get("event", {}).get("magnitude_value") is None
+    assert "magnitude_value 0 was dropped" in result.get("note", "")
+    # A zero the user wrote stays.
+    _, _, audit, _ = classify(tools, SessionCases(), "Peru in March, 0 people vaccinated, it lasted 3 days",
+                              country="Peru", start_month=3, duration_days=3, magnitude_scale="Vaccinated",
+                              magnitude_value=0)
+    assert audit["case"]["event"]["magnitude_value"] == 0

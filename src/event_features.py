@@ -119,7 +119,7 @@ def country_from_text(text: Optional[str], countries: List[str]) -> Optional[str
     return found.pop() if len(found) == 1 else None
 
 
-_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*-?\s*(?:กว่า\s*)?"
+_DURATION = re.compile(r"(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*-?\s*(?:กว่า\s*)?"
                        r"(minutes?|mins?|hours?|hrs?|days?|weeks?|months?|นาที|ชั่วโมง|วัน|สัปดาห์|อาทิตย์|เดือน)(?![a-z])")
 _DAYS_PER = {"minute": 1 / 1440, "min": 1 / 1440, "hour": 1 / 24, "hr": 1 / 24, "day": 1, "week": 7, "month": 30,
              "นาที": 1 / 1440, "ชั่วโมง": 1 / 24, "วัน": 1, "สัปดาห์": 7, "อาทิตย์": 7, "เดือน": 30}
@@ -129,7 +129,9 @@ def duration_from_text(text: Optional[str]) -> Optional[float]:
     """How long the event lasted, in days, when the message gives exactly one length ("over 2 days", "3 สัปดาห์").
 
     None when it gives none or several (which one is the duration is then the LLM's call, not ours)."""
-    found = {(float(n), unit.rstrip("s") if unit.isascii() else unit) for n, unit in _DURATION.findall((text or "").lower())}
+    # "1,675 วัน" is 1675 days: the comma groups thousands (typed eval CASE-0608 read 675).
+    found = {(float(n.replace(",", "")), unit.rstrip("s") if unit.isascii() else unit)
+             for n, unit in _DURATION.findall((text or "").lower())}
     if len(found) != 1:
         return None
     n, unit = found.pop()

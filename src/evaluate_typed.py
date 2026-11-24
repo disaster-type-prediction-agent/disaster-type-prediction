@@ -58,7 +58,7 @@ def sample_cases(registry, per_class, seed):
     return picked
 
 
-def run_case(case, index, key, tools, registry, calls):
+def run_case(case, index, key, tools, registry, calls, messages=None):
     from src.answer_check import check_answer
     from src.agent import agent_turn_text
     from src.auditor_agent import GeminiAuditorAgent, SessionCases
@@ -72,7 +72,8 @@ def run_case(case, index, key, tools, registry, calls):
         "case_id": case["case_id"], "true_type": case["ground_truth_class"], "language": language,
         "direct": {m: case["evaluations"][m]["predicted_class"] for m in MODELS},
     }
-    message = write_scenario(key, event, language)
+    # Reusing an earlier run's messages keeps the wording fixed, so a change in results comes from the code.
+    message = (messages or {}).get(case["case_id"]) or write_scenario(key, event, language)
     if not message:
         record["error"] = "writer failed"
         return record
@@ -132,7 +133,7 @@ def drop_results(case_ids):
     RESULTS.write_text("".join(keep))
 
 
-def run(per_class, seed, pause):
+def run(per_class, seed, pause, reuse=None):
     from src import agent
     from src.auditor_agent import AuditorTools
     from src.models.registry import ModelRegistry
@@ -152,13 +153,17 @@ def run(per_class, seed, pause):
         done = {json.loads(line)["case_id"] for line in RESULTS.open() if line.strip()}
 
     cases = sample_cases(registry, per_class, seed)
+    messages = {}
+    if reuse:
+        messages = {r["case_id"]: r["message"] for r in map(json.loads, Path(reuse).open()) if r.get("message")}
+        print(f"reusing {len(messages)} messages from {reuse}", flush=True)
     todo = [(i, c) for i, c in enumerate(cases) if c["case_id"] not in done]
     print(f"{len(cases)} cases sampled, {len(done)} already done, {len(todo)} to run", flush=True)
     for n, (i, case) in enumerate(todo, 1):
         for attempt in range(3):
             quota_before = calls["quota"]
             try:
-                record = run_case(case, i, key, tools, registry, calls)
+                record = run_case(case, i, key, tools, registry, calls, messages)
             except Exception as e:  # keep going; the case is retried on the next run
                 record = {"case_id": case["case_id"], "error": repr(e)}
             failed = record.get("error") or record.get("typed") is None
@@ -267,8 +272,9 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--pause", type=float, default=6.0, help="seconds between cases (free-tier rate limits)")
     ap.add_argument("--summarize", action="store_true")
+    ap.add_argument("--reuse-messages", help="results.jsonl of an earlier run: send the same messages again")
     ap.add_argument("--redo", help="comma-separated case ids to drop from the results and run again")
     args = ap.parse_args()
     if args.redo:
         drop_results({c.strip().upper() for c in args.redo.split(",") if c.strip()})
-    summarize() if args.summarize else run(args.per_class, args.seed, args.pause)
+    summarize() if args.summarize else run(args.per_class, args.seed, args.pause, args.reuse_messages)
