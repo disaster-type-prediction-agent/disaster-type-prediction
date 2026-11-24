@@ -187,3 +187,128 @@ def test_no_leaves_the_rejected_scale_out_of_the_averaging(tools, registry):
     _, _, audit, _ = classify(tools, session, "ไม่แน่ใจครับ", country="Thailand")
     assert "scale_ruled_out" not in audit["case"]
     assert "Moment Magnitude" in [m["scale"] for m in audit["models"]["Random Forest"]["prediction"]["scale_mix"]]
+
+
+ENGLISH = "In Thailand in 2014 my house suddenly shook for more than 10 minutes and was slightly damaged"
+
+
+def test_english_observation_with_an_adverb_is_asked(tools):
+    """Live app: "my house suddenly shook" was not seen as an observation, so Gemini's Moment Magnitude ran unasked."""
+    assert observed_scale(ENGLISH) == ("Moment Magnitude", "house suddenly shook")
+    assert observed_scale("the ground was violently shaking")[0] == "Moment Magnitude"
+    assert observed_scale("my house really shook all night")[0] == "Moment Magnitude"
+    assert observed_scale("the house was shaking")[0] == "Moment Magnitude"
+    assert observed_scale("he shook the house keys") is None
+
+    session = SessionCases()
+    result, _, audit, _ = classify(tools, session, ENGLISH, country="Thailand", duration_days=10,
+                                   magnitude_scale="Moment Magnitude")
+    assert audit is None and result["observed"]["words"] == "house suddenly shook"
+    assert "wind" not in result["question"] and "size of the ground shaking" in result["question"]
+
+
+def test_a_duration_left_in_minutes_is_corrected(tools):
+    """Live app: Gemini passed duration_days=10 for "more than 10 minutes"."""
+    session = SessionCases()
+    classify(tools, session, ENGLISH, country="Thailand", duration_days=10)
+    result, _, audit, _ = classify(tools, session, "yes, it was in May", country="Thailand", start_month=5,
+                                   duration_days=10)
+    assert audit["case"]["event"]["duration_days"] == 0.01
+    assert "replaced by 0.01 days" in result["note"]
+
+    # A figure close to the user's (0.007 for "10 กว่านาที") is left as the LLM read it.
+    session = SessionCases()
+    classify(tools, session, EXAMPLE, country="Thailand", duration_days=0.007)
+    _, _, audit, _ = classify(tools, session, "ใช่ครับ เดือนพฤษภาคม", country="Thailand", start_month=5,
+                              duration_days=0.007)
+    assert audit["case"]["event"]["duration_days"] == 0.007
+
+
+JA = "2014年にタイで、突然家が10分以上揺れて、家が少し壊れました"
+
+
+def test_quotes_back_values_in_languages_the_code_cannot_read(tools):
+    """Live Gemini: in Japanese it passed Moment Magnitude for "家が揺れて" unasked, and "5月" was dropped as no month."""
+    from src.event_features import code_reads, quoted
+    assert not code_reads(JA) and not code_reads("Sí, fue en mayo") and code_reads("Nothing was measured")
+    assert quoted("揺れて", JA) and quoted("tháng Năm", "Đúng, vào tháng năm") and not quoted("5月", JA)
+    assert not quoted("1", "in 2014") and not quoted("", JA)
+
+    session = SessionCases()
+    # No quote for the scale or the month: both dropped; the duration with its quote stays.
+    result, _, audit, _ = classify(tools, session, JA, country="Thailand", magnitude_scale="Moment Magnitude",
+                                   start_month=1, duration_days=0.007, duration_quote="10分以上")
+    assert audit is None and "observed" not in result and "start_month" not in result["given_so_far"]
+    assert result["given_so_far"]["duration_days"] == 0.007
+
+    # With the user's words quoted, the scale is an observation the user must confirm, as "บ้านสั่น" is.
+    session = SessionCases()
+    result, _, audit, _ = classify(tools, session, JA, country="Thailand", magnitude_scale="Moment Magnitude",
+                                   scale_quote="家が10分以上揺れて")
+    assert audit is None and result["observed"]["words"] == "家が10分以上揺れて"
+    _, _, audit, _ = classify(tools, session, "はい、5月でした", country="Thailand", magnitude_scale="Moment Magnitude",
+                              scale_quote="家が10分以上揺れて", answer="yes", answer_quote="はい",
+                              start_month=5, start_month_quote="5月")
+    case = audit["case"]
+    assert case["event"]["magnitude_scale"] == "Moment Magnitude" and case["event"]["start_month"] == 5
+    assert case["scale_observed"]["words"] == "家が10分以上揺れて"
+
+
+def test_a_made_up_answer_quote_does_not_confirm(tools):
+    session = SessionCases()
+    classify(tools, session, JA, country="Thailand", magnitude_scale="Moment Magnitude", scale_quote="揺れて")
+    _, _, audit, _ = classify(tools, session, "いいえ", country="Thailand", answer="yes", answer_quote="はい")
+    assert audit["case"]["scale_not_given"] and "scale_observed" not in audit["case"]
+
+    session = SessionCases()
+    classify(tools, session, JA, country="Thailand", magnitude_scale="Moment Magnitude", scale_quote="揺れて")
+    _, _, audit, _ = classify(tools, session, "いいえ", country="Thailand", answer="no", answer_quote="いいえ")
+    assert audit["case"]["scale_ruled_out"] == ["Moment Magnitude"]
+
+
+def test_quotes_must_mean_the_value_not_just_be_there(tools):
+    """Live Gemini: month quoted as "2014年"/"Năm 2014", magnitude_value 7 with no figure, 10 days for "十多分钟"."""
+    session = SessionCases()
+    result, _, audit, _ = classify(tools, session, JA, country="Thailand", start_month=5, start_month_quote="2014年",
+                                   magnitude_scale="Moment Magnitude", magnitude_value=7, scale_quote="揺れて")
+    assert audit is None and "start_month" not in result["given_so_far"]
+    assert "magnitude_value" not in result["given_so_far"]
+
+    vi = "Năm 2014 ở Thái Lan, nhà tôi đột nhiên rung lắc hơn 10 phút"
+    result, _, _, _ = classify(tools, SessionCases(), vi, country="Thailand", start_month=1, start_month_quote="Năm 2014")
+    assert "start_month" not in result["given_so_far"]
+
+    zh = "2014年在泰国，房子突然摇晃了十多分钟，房子有点损坏"
+    result, _, _, _ = classify(tools, SessionCases(), zh, country="Thailand", duration_days=10,
+                               duration_amount=10, duration_unit="minutes", duration_quote="十多分钟")
+    assert result["given_so_far"]["duration_days"] == round(10 / 1440, 4)
+
+    # A figure the user wrote stays.
+    result, _, audit, _ = classify(tools, SessionCases(), "2014年5月、タイでマグニチュード6.3", country="Thailand",
+                                   start_month=5, start_month_quote="5月", magnitude_value=6.3,
+                                   magnitude_scale="Moment Magnitude", scale_quote="マグニチュード6.3")
+    assert result["given_so_far"].get("magnitude_value") == 6.3
+
+
+def test_a_figure_needs_the_measurement_words_and_nothing_measured_needs_readable_words(tools):
+    """Live Gemini: magnitude_value 10 from "10 minutos"; nothing_measured quoted as "家が少し壊れました"."""
+    es = "En Tailandia en 2014 mi casa de repente tembló durante más de 10 minutos y sufrió daños leves"
+    session = SessionCases()
+    result, _, _, _ = classify(tools, session, es, country="Thailand", magnitude_scale="Moment Magnitude",
+                               magnitude_value=10, scale_quote="tembló", duration_amount=10, duration_unit="minutes",
+                               duration_quote="más de 10 minutos")
+    assert "magnitude_value" not in result["given_so_far"] and result["given_so_far"]["duration_days"] > 0
+    # The answer turn: the duration checked on the first message is kept without a new quote.
+    _, _, audit, _ = classify(tools, session, "Sí, fue en mayo", country="Thailand", magnitude_scale="Moment Magnitude",
+                              scale_quote="tembló", answer="yes", answer_quote="Sí", start_month=5,
+                              start_month_quote="mayo", duration_amount=10, duration_unit="minutes")
+    assert audit["case"]["event"]["duration_days"] == round(10 / 1440, 4)
+    assert audit["case"]["event"]["magnitude_value"] is None
+
+    result, _, audit, _ = classify(tools, SessionCases(), JA + " 5月", country="Thailand", start_month=5,
+                                   start_month_quote="5月", duration_amount=10, duration_unit="minutes",
+                                   duration_quote="10分以上", nothing_measured=True,
+                                   nothing_measured_quote="家が少し壊れました")
+    # Not taken as "nothing measured": the scale is still missing, so the app asks instead of running on Unknown.
+    assert audit is None and "magnitude_scale" not in result["given_so_far"]
+    assert "nothing_measured was ignored" in result.get("note", "") or result["status"] == "need_more_details"

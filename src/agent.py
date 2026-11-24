@@ -96,8 +96,10 @@ def language_note(text: str) -> str:
         return "[Reply language: Thai. Answer in polite Thai (ครับ/ค่ะ), whatever language earlier turns used.]"
     if lang == "English":
         return "[Reply language: English. Answer in English, even if earlier turns were in another language, with disaster classes in English only (no other script).]"
+    # A Vietnamese message naming "Thái Lan" came back in Thai: say which language it is not.
     return ("[Reply language: the language of the latest user message above (not English unless it is English, "
-            "and not the language of earlier turns). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
+            "not Thai unless it is written in Thai script, and not the language of earlier turns or of a place it "
+            "names). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
 
 
 

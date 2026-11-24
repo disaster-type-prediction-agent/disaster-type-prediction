@@ -54,7 +54,7 @@ def test_asks_once_then_runs_on_the_next_message(tools):
 
 
 def test_enough_detail_runs_straight_away(tools):
-    result, _, audit, _ = classify(tools, SessionCases(), "storm text", **FULL)
+    result, _, audit, _ = classify(tools, SessionCases(), "In Thailand in November, 120 kph winds for 3 days", **FULL)
     assert audit and "status" not in result
 
 

@@ -1,12 +1,16 @@
 """Tool-using auditor agents (Claude or Gemini): the LLM decides which registry tools to call and answers from their results."""
 import json
+import re
 from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, denies, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text)
+                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, denies, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text, quoted, code_reads)
 
 MODEL = "claude-opus-5-5"
+_UNIT_DAYS = {"minutes": 1 / 1440, "hours": 1 / 24, "days": 1, "weeks": 7, "months": 30}
+QUOTE_RULE = ("The user's own words that state this value, copied exactly from their message in their language "
+              "(e.g. \"5月\", \"tembló\"). A value with no quote that is in the user's words is dropped.")
 MAX_TOOL_ROUNDS = 6
 MAX_JSON_RETRIES = 2
 
@@ -19,7 +23,7 @@ How to work:
 - When the user wants to see, test or find a case, call find_case (or get_case for a specific id). The app shows each case you load as a card, so summarize what matters instead of repeating every field.
 - When the user describes a specific event of their own (a place, month, duration, or size such as wind speed or area), call classify_event with only the details they actually gave; pass stated_true_type only if they say what it really was. Then tell them which attributes were missing (filled with training defaults) and that adding them may change the prediction.
 - If classify_event returns need_more_details, the models did not run: ask the user for those details (one short question) and stop; never predict or hint at a type yourself. On their next message, call classify_event again with everything they've said so far (it runs then, even if they don't know the rest; if they say nothing was measured, pass nothing_measured=true).
-- "Nothing was measured" and "not said" are different. Pass nothing_measured=true only when the user says nothing was measured; then the models see the Unknown scale, as for recorded events without a measurement. If the user just doesn't say or doesn't know, leave both out: the app averages the models over the scales usually recorded for that place and month, and the case shows that mix. Never set magnitude_scale from the disaster the user describes (an earthquake, a flood), only from a quantity they say was measured. Nor from what they saw or felt (the house shaking, strong wind, extreme heat): leave it out; the app itself asks them to confirm the quantity.
+- "Nothing was measured" and "not said" are different. Pass nothing_measured=true only when the user says nothing was measured; then the models see the Unknown scale, as for recorded events without a measurement. If the user just doesn't say or doesn't know, leave both out: the app averages the models over the scales usually recorded for that place and month, and the case shows that mix. Never set magnitude_scale from the disaster the user describes (an earthquake, a flood), only from a quantity they say was measured. Nor from what they saw or felt (the house shaking, strong wind, extreme heat): leave it out; the app itself asks them to confirm the quantity. With start_month, duration_days, magnitude_scale, nothing_measured and the answer to the app's question, pass the matching *_quote: the user's exact words, copied in their language; a value the app can't find in the user's words is dropped.
 - To revisit a case already loaded or classified (another model, why not X, more detail), use get_case or explain_prediction with its id (EVENT-n or CASE-n). Call classify_event again only when the user changes or adds event details; otherwise you'd create a duplicate event.
 - Write for people: say "not given (default used)" and "% of the evidence", never raw field names like filled_in or share_pct.
 - If the question is about particular models, pass them in `models`; otherwise leave it out to use the models selected in the UI.
@@ -76,6 +80,11 @@ def _close_dangling_tool_calls(history: List[Dict[str, Any]], reason: str) -> No
         history.append({"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": i, "is_error": True, "content": reason} for i in ids
         ]})
+
+
+def _numbers(text: str) -> set:
+    """The numbers written in a message ("6,3" and "6.3" both count)."""
+    return {float(n.replace(",", ".")) for n in re.findall(r"\d+(?:[.,]\d+)?", text or "")}
 
 
 def agent_sources(steps: List[Dict[str, Any]], text: str, llm_name: str) -> str:
@@ -180,6 +189,10 @@ class AuditorTools:
                         "region": {"type": "string", "enum": REGIONS, "description": "Only if no country is given."},
                         "start_month": {"type": "integer", "minimum": 1, "maximum": 12},
                         "duration_days": {"type": "number", "minimum": 0, "description": "Only if the user said how long it lasted; convert hours/weeks to days."},
+                        "duration_amount": {"type": "number", "minimum": 0, "description": (
+                            "How long it lasted, as the user said it (10 for \"10 minutes\"), with duration_unit; "
+                            "the app converts it to days.")},
+                        "duration_unit": {"type": "string", "enum": ["minutes", "hours", "days", "weeks", "months"]},
                         "magnitude_value": {"type": "number", "minimum": 0,
                                             "description": "Wind speed in kph, area in km2, Richter/moment magnitude, temperature °C, or people vaccinated."},
                         "magnitude_scale": {"type": "string", "enum": MAGNITUDE_SCALES, "description": "What was measured, even when no figure is given (e.g. 'affected area was reported' -> Km2): area Km2, wind speed Kph, Richter/moment magnitude, temperature °C, people vaccinated."},
@@ -187,6 +200,14 @@ class AuditorTools:
                             "Only if the user said nothing at all was measured for the event (not just that they "
                             "don't know). If they name what was measured but give no figure ('wind speed was "
                             "recorded, no number'), that is magnitude_scale (Kph), not nothing_measured.")},
+                        "start_month_quote": {"type": "string", "description": QUOTE_RULE + " For start_month."},
+                        "duration_quote": {"type": "string", "description": QUOTE_RULE + " For duration_days."},
+                        "scale_quote": {"type": "string", "description": QUOTE_RULE + " For magnitude_scale/magnitude_value."},
+                        "nothing_measured_quote": {"type": "string", "description": QUOTE_RULE + " For nothing_measured."},
+                        "answer": {"type": "string", "enum": ["yes", "no", "not_sure"], "description": (
+                            "When the user answers the app's question asking them to confirm a measured quantity: "
+                            "what they answered.")},
+                        "answer_quote": {"type": "string", "description": QUOTE_RULE + " For answer."},
                         "stated_true_type": {"type": "string", "enum": self.classes,
                                              "description": "Only if the user says what the event actually was."},
                         "models": models_param,
@@ -261,7 +282,7 @@ class AuditorTools:
                   and _enum_or_none(args.get("misclassified_by"), self.models)
                   and bool_ok("only_hard") and bool_ok("only_disagreement") and models_ok())
         elif name == "classify_event":
-            month, numbers = args.get("start_month"), [args.get(k) for k in ("duration_days", "magnitude_value")]
+            month, numbers = args.get("start_month"), [args.get(k) for k in ("duration_days", "magnitude_value", "duration_amount")]
             ok = (_enum_or_none(args.get("region"), REGIONS)
                   and _enum_or_none(args.get("magnitude_scale"), MAGNITUDE_SCALES)
                   and _enum_or_none(args.get("stated_true_type"), self.classes)
@@ -330,17 +351,52 @@ class AuditorTools:
                 if found and event["region"] in (None, self.country_regions.get(found)):
                     event["country"], event["region"] = found, self.country_regions.get(found)
                     notes.append(f"Country {found} was read from the message by the app.")
-            if event["duration_days"] is None:
-                days = duration_from_text(text)
-                if days is not None:
-                    event["duration_days"] = days
-                    notes.append(f"Duration {days:g} days was read from the message by the app.")
-            if event["start_month"] and text and not mentions_month(text):
+            amount, unit = args.get("duration_amount"), args.get("duration_unit")
+            if isinstance(amount, (int, float)) and not isinstance(amount, bool) and unit in _UNIT_DAYS:
+                # The LLM reads the length, the code converts it: Gemini passed 10 days for "十多分钟" (10+ minutes).
+                event["duration_days"] = round(amount * _UNIT_DAYS[unit], 4)
+            # Thai and English the code reads itself. Any other language: a value counts only with a quote of the
+            # user's words that is really in the message (Gemini invented months and scales the user never gave).
+            readable = code_reads(text)
+            answer_readable = code_reads(session.message)
+            days = duration_from_text(text)
+            vetted_days = (session.asked_event or {}).get("duration_days") if answering else None
+            if (not readable and days is None and event["duration_days"] is not None
+                    and event["duration_days"] != vetted_days  # checked on the first message already
+                    and not quoted(args.get("duration_quote"), text)):
+                notes.append("duration_days was dropped: no quote of the user's words backs it.")
+                event["duration_days"] = None
+            if days is not None and event["duration_days"] is None:
+                event["duration_days"] = days
+                notes.append(f"Duration {days:g} days was read from the message by the app.")
+            elif days and event["duration_days"] is not None and not 0.5 <= event["duration_days"] / days <= 2:
+                # The message gives exactly one length and the LLM's figure is far from it: in the app Gemini passed
+                # duration_days=10 for "more than 10 minutes" (the unit never converted). The user's words win.
+                notes.append(f"duration_days {event['duration_days']:g} was replaced by {days:g} days, "
+                             "the length the user's words give.")
+                event["duration_days"] = days
+            month_quote = args.get("start_month_quote") or ""
+            # "2014年" and "Năm 2014" were passed as the month's quote: words holding the year are not a month.
+            if event["start_month"] and text and not (
+                    mentions_month(text) if readable
+                    else quoted(month_quote, text) and not re.search(r"\d{4}", month_quote)):
                 # The LLM filled a month the user never gave (in the app, start_month=1 for "ที่ไทยในปี 2014 ...").
                 # Left out, the app asks for it and, if still unknown, reports January as a filled default.
                 event["start_month"] = None
                 notes.append("start_month was dropped: the user's words name no month.")
-            if nothing_measured and not says_nothing_measured(text):
+            value = event["magnitude_value"]
+            scale_quote = args.get("scale_quote") or ""
+            if (not readable and value is not None and value != (session.asked_event or {}).get("magnitude_value")
+                    and not (quoted(scale_quote, text) and value in _numbers(scale_quote))):
+                # Gemini passed magnitude_value 7 for "家が10分以上揺れて", which gives no figure, and 10 for
+                # "tembló durante más de 10 minutos": the figure must be in the words that state the measurement.
+                notes.append(f"magnitude_value {value:g} was dropped: that number is not in the user's words.")
+                event["magnitude_value"] = None
+            # "Nothing was measured" turns into the Unknown scale, a strong answer. In a language the code can't read,
+            # a quote can't show that meaning (Gemini quoted "家が少し壊れました", the house was slightly damaged), so
+            # there it is not taken: the scale stays not given and is averaged over the likely ones.
+            said_nothing = says_nothing_measured(text) if readable else False
+            if nothing_measured and not said_nothing:
                 # The LLM read "I don't know" as "nothing measured" (seen in the app on "ไม่ทราบครับ"). That would
                 # feed the models the Unknown scale; not knowing is averaged over likely scales instead.
                 nothing_measured = False
@@ -349,8 +405,26 @@ class AuditorTools:
             # the scale and only the user's yes puts it into the models. The LLM may not do this on its own.
             said_scale = scale_from_text(text)
             seen = observed_scale(text)
+            if not readable:
+                # The code can't tell an observation from a named quantity in this language, so a scale backed only
+                # by the LLM's quote is treated as an observation: the user is asked to confirm it.
+                quote = args.get("scale_quote")
+                seen = None
+                if event["magnitude_scale"] not in (None, "Unknown") and not said_scale:
+                    if quoted(quote, text):
+                        seen = (event["magnitude_scale"], quote.strip())
+                    else:
+                        notes.append(f"Magnitude scale {event['magnitude_scale']} was dropped: no quote of the "
+                                     "user's words backs it.")
+                        event["magnitude_scale"] = None
             proposed = session.proposed_scale if answering else None
-            confirmed = bool(proposed) and confirms(session.message)
+
+            def answered(kind: str) -> bool:
+                if answer_readable:
+                    return (confirms if kind == "yes" else denies)(session.message)
+                return args.get("answer") == kind and quoted(args.get("answer_quote"), session.message)
+
+            confirmed = bool(proposed) and answered("yes")
             observed = ruled_out = None
             if (event["magnitude_scale"] not in (None, "Unknown") and not said_scale and seen
                     and seen[0] == event["magnitude_scale"]):
@@ -363,11 +437,11 @@ class AuditorTools:
             if event["magnitude_scale"] in (None, "Unknown"):
                 event["magnitude_scale"] = None
                 scale = said_scale
-                if not scale and confirmed and not says_nothing_measured(session.message):
+                if not scale and confirmed and not said_nothing:
                     event["magnitude_scale"], observed = proposed[0], proposed
                     notes.append(f"Magnitude scale {proposed[0]} comes from what the user observed "
                                  f"(\"{proposed[1]}\"), confirmed by the user.")
-                elif proposed and not scale and denies(session.message):
+                elif proposed and not scale and answered("no"):
                     # "ไม่ใช่" says what it was not: that scale leaves the averaging. "ไม่แน่ใจ" says nothing.
                     ruled_out = proposed[0]
                     notes.append(f"The user said the quantity was not {proposed[0]}; the scale stays not given and "

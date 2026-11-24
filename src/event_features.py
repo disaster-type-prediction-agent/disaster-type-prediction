@@ -206,7 +206,9 @@ def says_nothing_measured(text: Optional[str]) -> bool:
 # value the models see comes from the user, not from this table or the LLM. Vaccinated has no observation.
 OBSERVATION_WORDS = {
     "Moment Magnitude": [
-        r"(?:ground|earth|house|houses|home|building|buildings|walls?|floor|windows?)\s+(?:was\s+|were\s+|started\s+|began\s+)?"
+        # "my house suddenly shook", "the ground was violently shaking": adverbs may sit before the verb.
+        r"(?:ground|earth|house|houses|home|building|buildings|walls?|floor|windows?)\s+"
+        r"(?:(?:was|were|started|began|started to|began to|just|then|all of a sudden|[a-z]+ly)\s+){0,3}"
         r"(?:shook|shaking|shake|swayed|swaying|trembled|trembling)",
         r"(?:shaking|trembling) (?:of the )?(?:ground|earth|house|building)s?",
         r"(?:บ้าน|พื้น|ตึก|อาคาร|แผ่นดิน|ผนัง|หน้าต่าง)(?:ก็)?(?:สั่น|โยก)", r"สั่นสะเทือน", r"สั่นไหว"],
@@ -249,7 +251,7 @@ def confirm_question(scale: str, words: str, missing: List[str], text: Optional[
         return q + "\n\nถ้าไม่แน่ใจหรือไม่ทราบ ตอบได้เลยครับ ระบบจะเฉลี่ยจากสิ่งที่มักบันทึกในพื้นที่นั้นแทน"
     q = f"You described \"{words}\". Was the quantity measured for this event {SCALE_QUANTITY[scale]}? (yes / no / not sure)"
     if others:
-        q += " Also, " + " and ".join(en for _, en in others) + "?"
+        q += " Also, please tell me " + " and ".join(en for _, en in others) + "."
     return q + "\n\nIf you're not sure or don't know, just say so: the app will average over what is usually recorded there."
 
 
@@ -280,6 +282,35 @@ def confirms(text: Optional[str]) -> bool:
     """Whether an answer confirms what the app proposed: its first yes/no word is a yes."""
     m = _YES_NO.search((text or "").lower())
     return bool(m and m.group("yes"))
+
+
+_EN_WORDS = {"the", "a", "an", "is", "are", "was", "were", "it", "in", "on", "of", "for", "to", "and", "or", "not",
+             "no", "yes", "yeah", "nope", "with", "from", "this", "that", "my", "i", "there", "nothing", "happened",
+             "lasted", "days", "month", "measured", "sure", "know", "don't", "was", "about", "after", "during"}
+
+
+def code_reads(text: Optional[str]) -> bool:
+    """Whether the code's own readers (months, observations, yes/no, durations) cover this text: Thai, or English.
+
+    Latin text with other letters (é, ă, ñ) or with no English word ("En Tailandia en 2014 mi casa...") is another
+    language; there the code relies on quoted() instead."""
+    t = text or ""
+    if re.search(r"[\u0e00-\u0e7f]", t):
+        return True
+    if any(ch.isalpha() and not ch.isascii() for ch in t):
+        return False
+    words = re.findall(r"[a-z']+", t.lower())
+    return not words or any(w in _EN_WORDS for w in words)
+
+
+def quoted(quote: Optional[str], text: Optional[str]) -> bool:
+    """Whether the LLM's quote is really in the user's words: any language, ignoring case and spaces.
+
+    For languages the code cannot read itself, a value counts only with a quote that passes this check (Gemini
+    invented a month for "2014年にタイで..." and passed the type's scale for "家が揺れて"). A quote must hold a
+    letter: a bare "1" is found in "2014"."""
+    q = re.sub(r"\s+", "", (quote or "").casefold())
+    return bool(q) and any(ch.isalpha() for ch in q) and q in re.sub(r"\s+", "", (text or "").casefold())
 
 
 _UNSURE = re.compile(r"ไม่แน่ใจ|ไม่ทราบ|ไม่รู้|(?<![a-z])(?:not sure|unsure|don'?t know|do not know|no idea)(?![a-z])")
