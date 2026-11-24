@@ -342,7 +342,7 @@ SLASH_COMMANDS = (
     [
         {"cmd": "/random", "desc": "Audit a random test case"},
         {"cmd": "/hard", "desc": "A case at least one model got wrong"},
-        {"cmd": "/compare", "desc": "A disagreement case, all three models"},
+        {"cmd": "/compare", "desc": "All three models on your last event (or a case they disagree on)"},
     ]
     + [
         {"cmd": f"/category {c}", "desc": f"Audit {'an' if c[0] in 'AEIOU' else 'a'} {c} case"}
@@ -720,6 +720,22 @@ def run_audit(case, prompt_label=None, target_models=None):
     st.rerun()
 
 
+def compare_user_event(last):
+    """/compare after the user described an event: every model on THAT event, not on a test-bank case.
+
+    In the app, "10 days of rain in Thailand in October" then /compare showed a Tajikistan drought from the
+    test bank, and the user had to argue "no, it's Thailand!"."""
+    models = st.session_state.comparison_models
+    case = last["case"]
+    audit = registry.audit_case(case, models)  # a scale not given is averaged the same way as before
+    if "llm" in last:
+        audit["llm"] = last["llm"]  # same event, same Gemini guess: don't ask Gemini again
+    register_audit(audit, models)
+    st.session_state.messages.append({"role": "user", "content": f"`/compare` {case['case_id']}"})
+    st.session_state.messages.append({"role": "assistant", "audit": audit, "models_tested": models})
+    st.rerun()
+
+
 QUICK_ACTIONS = {
     ":material/shuffle: Random case": ({}, "Audit a random historical case from the test bank"),
     ":material/warning: Hard case": ({"only_hard": True}, "Examine a case at least one model misclassified"),
@@ -751,7 +767,11 @@ def handle_slash_command(command_text: str):
         run_audit(registry.get_random_case(only_hard=True), "`/hard`")
     elif cmd.startswith("/compare"):
         st.session_state.comparison_mode = True
-        run_audit(registry.get_random_case(only_disagreement=True), "`/compare`")
+        last = st.session_state.last_audit
+        if last and last["case"].get("source") == "user":
+            compare_user_event(last)
+        else:
+            run_audit(registry.get_random_case(only_disagreement=True), "`/compare`")
     elif cmd.startswith("/category"):
         parts = cmd.split(maxsplit=1)
         cat_query = parts[1].strip() if len(parts) > 1 else "Flood"

@@ -103,3 +103,22 @@ def test_without_a_key_keywords_still_route_test_cases(app):
     assert not at.exception
     [rec] = at.session_state["stats"]["records"]
     assert rec["source"] == "Test bank" and rec["gemini_prediction"] is None
+
+
+def test_compare_after_a_described_event_compares_that_event(chat):
+    at, ask = chat
+    ask("10 days of rain in Bangladesh in July, 5000 km2", route_for())
+    at.chat_input[0].set_value("/compare").run()
+    assert not at.exception, at.exception
+
+    audit = at.session_state["last_audit"]
+    assert audit["case"]["case_id"] == "EVENT-1", "the user's event, not a test-bank case"
+    assert set(audit["models"]) == {"Random Forest", "LightGBM", "XGBoost"}
+    assert at.session_state["messages"][-2]["content"] == "`/compare` EVENT-1"
+
+
+def test_compare_with_no_event_still_finds_a_disagreement_case(chat):
+    at, _ = chat
+    at.chat_input[0].set_value("/compare").run()
+    assert not at.exception, at.exception
+    assert at.session_state["last_audit"]["case"]["case_id"].startswith("CASE-")
