@@ -144,3 +144,18 @@ def test_the_app_shows_its_question_without_asking_gemini_again(tools):
                                     [chunk(types.Part(text="Random Forest predicted Drought."))]],
                             question="ไม่แน่ใจครับ", history=history, session=session)
     assert len(client.requests) == 2 and next(p for k, p in events if k == "tool")["audit"]["case"]["scale_not_given"]
+
+
+def test_the_source_line_says_the_app_wrote_the_question():
+    """Live app: under the app's own question the line still read "...and Gemini's general knowledge"."""
+    from src.auditor_agent import agent_sources
+    from src.event_features import confirm_question
+    question = confirm_question("Moment Magnitude", "บ้านสั่น", ["the month it started"], EXAMPLE)
+    step = {"detail": '`classify_event` {"country": "Thailand"}', "is_error": False,
+            "result": {"status": "need_more_details", "question": question}}
+    line = agent_sources([step], question, "Gemini")
+    assert "written by the app" in line and "general knowledge" not in line
+
+    answered = {**step, "result": {"status": "classified"}}
+    assert agent_sources([answered], "Random Forest predicted Drought.", "Gemini").startswith("Based on 1 tool result")
+    assert agent_sources([], "hi", "Gemini").startswith("No tools used")

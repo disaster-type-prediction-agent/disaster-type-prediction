@@ -78,6 +78,20 @@ def _close_dangling_tool_calls(history: List[Dict[str, Any]], reason: str) -> No
         ]})
 
 
+def agent_sources(steps: List[Dict[str, Any]], text: str, llm_name: str) -> str:
+    """The line under an agent answer saying what it drew on. The app's own question is not the LLM's words."""
+    asked = next((s["result"]["question"] for s in steps
+                  if not s["is_error"] and isinstance(s.get("result"), dict) and s["result"].get("question")), None)
+    if asked and text.strip() == asked.strip():
+        return ("Question written by the app from your words (classify_event); "
+                f"no model has run yet and {llm_name} did not write it.")
+    used = sorted({s["detail"].split("`")[1] for s in steps if not s["is_error"]})
+    if used:
+        return (f"Based on {len(used)} tool result{'s' if len(used) != 1 else ''} ({', '.join(used)}) "
+                f"and {llm_name}'s general knowledge where the answer says so.")
+    return f"No tools used: {llm_name}'s general knowledge and the app's built-in facts."
+
+
 class SessionCases:
     """Events the user described in this chat (EVENT-1, EVENT-2, ...), so tools can find them again.
 

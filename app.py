@@ -13,7 +13,7 @@ from sklearn.metrics import f1_score
 load_dotenv()
 
 from src.agent import RESTART, DisasterAuditorLLM, agent_turn_text, reply_language, set_usage_hook
-from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases
+from src.auditor_agent import AuditorTools, ClaudeAuditorAgent, GeminiAuditorAgent, SessionCases, agent_sources
 from src.event_features import RAW_ATTRIBUTES, attribute_columns, countries_from, event_from_case, make_event_case, compare_events, type_stated_in_text
 from src.llm_tasks import llm_guess, route_question, write_scenario
 from src.answer_check import check_answer
@@ -906,10 +906,7 @@ def answer_with_agent(question):
             answer_ph.markdown(text)
         steps_box.update(label=steps_label(steps), state="error" if error and not steps else "complete")
 
-    used = sorted({s["detail"].split("`")[1] for s in steps if not s["is_error"]})
-    sources = (f"Based on {len(used)} tool result{'s' if len(used) != 1 else ''} ({', '.join(used)}) "
-               f"and {llm_name}'s general knowledge where the answer says so." if used
-               else f"No tools used: {llm_name}'s general knowledge and the app's built-in facts.")
+    sources = agent_sources(steps, text, llm_name)
     # New case cards must have their prediction named; other tool answers are checked on the figures they quote.
     tool_results = [s.get("result") for s in steps if not s["is_error"]]
     check = None
