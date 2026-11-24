@@ -338,3 +338,38 @@ def test_typed_eval_regressions_after_the_quote_checks(tools):
         _, _, audit, _ = classify(tools, SessionCases(), msg, country="State of Palestine", start_month=1,
                                   duration_days=18, magnitude_scale="°C", magnitude_value=0)
         assert audit["case"]["event"]["magnitude_value"] == 0, msg
+
+
+def test_the_source_line_says_the_app_wrote_a_reply_gemini_never_gave():
+    """Live app: Gemini failed on "ใช่ครับ" and the app's own reply was labelled "Gemini's general knowledge"."""
+    from src.auditor_agent import agent_sources
+    line = agent_sources([], "nothing ran", "Gemini", llm_answered=False)
+    assert line.startswith("Written by the app, not Gemini") and "general knowledge" not in line
+    step = {"detail": '`classify_event` {"country": "Thailand"}', "is_error": False, "result": {"status": "classified"}}
+    assert "Tool results shown: classify_event" in agent_sources([step], "x", "Gemini", llm_answered=False)
+
+
+def test_gemini_failing_on_the_answer_says_to_send_it_again(app):
+    """The app asked to confirm "บ้านสั่น"; Gemini was out of quota on "ใช่ครับ". The reply must say nothing ran
+    and that the question is still open, not greet the user or tell them to add a key."""
+    from unittest import mock
+
+    from google.genai import types
+
+    from tests.test_gemini_agent import FakeClient, call, chunk, server_error
+    at = app({"GEMINI_API_KEY": "AIzaSyFAKE"})
+    ask = [[chunk(call("classify_event", country="Thailand", start_month=5, duration_days=1))]]
+    with mock.patch("src.agent.make_gemini_client", return_value=FakeClient(ask)), \
+         mock.patch("src.agent.gemini_models", return_value=["model-a"]):
+        at.chat_input[0].set_value("ที่ประเทศไทย เดือนพฤษภาคม บ้านสั่นอยู่นานประมาณ 1 วัน").run()
+    assert not at.exception, at.exception
+    assert at.session_state["session_cases"].asked_details_on
+
+    with mock.patch("src.agent.make_gemini_client", return_value=FakeClient([server_error(429)] * 4)), \
+         mock.patch("src.agent.gemini_models", return_value=["model-a"]):
+        at.chat_input[0].set_value("ใช่ครับ").run()
+    assert not at.exception, at.exception
+    last = at.session_state["messages"][-1]
+    assert "ส่งคำตอบเดิมอีกครั้ง" in last["content"] and "built-in summary" not in last["content"]
+    assert last["sources"].startswith("Written by the app, not Gemini")
+    assert at.session_state["session_cases"].asked_details_on  # still open: sending it again carries on

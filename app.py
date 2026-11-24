@@ -917,8 +917,15 @@ def answer_with_agent(question):
             elif kind == "error":
                 error = payload
 
+        llm_answered = not (error and not text.strip())
         if error:
-            if not text.strip():
+            waiting = st.session_state.session_cases.asked_details_on
+            if not text.strip() and waiting:
+                # Nothing came back while the app waits for an answer to its question: the built-in summary
+                # greeted the user and told them to add a key the shared one already covers. Say plainly that
+                # nothing ran and that sending the same answer again carries on.
+                text = busy_reply(question, error, answering=True)
+            elif not text.strip():
                 # Nothing came back (quota, outage): still give the built-in summary of the case on screen.
                 fallback = "".join(DisasterAuditorLLM(provider="gemini").local_answer(question, st.session_state.last_audit))
                 text = f":orange[:material/warning:] {error}\n\nHere is the built-in summary instead:\n\n{fallback}"
@@ -927,7 +934,7 @@ def answer_with_agent(question):
             answer_ph.markdown(text)
         steps_box.update(label=steps_label(steps), state="error" if error and not steps else "complete")
 
-    sources = agent_sources(steps, text, llm_name)
+    sources = agent_sources(steps, text, llm_name, llm_answered)
     # New case cards must have their prediction named; other tool answers are checked on the figures they quote.
     tool_results = [s.get("result") for s in steps if not s["is_error"]]
     check = None
@@ -955,12 +962,21 @@ def keyword_route(question):
     }
 
 
-def busy_reply(question, reason):
+def busy_reply(question, reason, answering=False):
     """The answer when Gemini can't be used and nothing ran: say so plainly, in the message's language.
 
     Reading a described event takes Gemini, so the models have not run on it. The built-in summary would
-    greet the user or describe an older case instead, which reads as if the message had been ignored."""
-    if reply_language(question) == "Thai":
+    greet the user or describe an older case instead, which reads as if the message had been ignored.
+    answering: the message answers the app's question, which is still open, so sending it again carries on."""
+    thai = reply_language(question) == "Thai"
+    if answering:
+        if thai:
+            return (f":orange[:material/hourglass_empty:] {reason}\n\nยังไม่ได้รันโมเดลกับคำตอบนี้ครับ "
+                    "คำถามก่อนหน้ายังรอคำตอบอยู่ ส่งคำตอบเดิมอีกครั้งในอีกสักครู่ได้เลย ไม่ต้องเล่าเหตุการณ์ใหม่")
+        return (f":orange[:material/hourglass_empty:] {reason}\n\nThe models haven't run on this answer yet. "
+                "The app's question is still open: send the same answer again in a moment, no need to describe "
+                "the event again.")
+    if thai:
         return (f":orange[:material/hourglass_empty:] {reason} การอ่านเหตุการณ์ที่พิมพ์มาต้องใช้ Gemini "
                 "จึงยังไม่ได้รันโมเดลกับข้อความนี้ครับ ลองส่งใหม่อีกครั้งในอีกสักครู่ หรือใส่ Gemini key ของคุณเอง "
                 "(ฟรี) ใน Settings ระหว่างนี้ปุ่มด้านบน เช่น *Random case* หรือ *Hard case* ใช้ได้โดยไม่ต้องใช้ Gemini")

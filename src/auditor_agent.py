@@ -107,14 +107,20 @@ def _numbers(text: str) -> set:
     return {float(n.replace(",", ".")) for n in re.findall(r"\d+(?:[.,]\d+)?", text or "")}
 
 
-def agent_sources(steps: List[Dict[str, Any]], text: str, llm_name: str) -> str:
-    """The line under an agent answer saying what it drew on. The app's own question is not the LLM's words."""
+def agent_sources(steps: List[Dict[str, Any]], text: str, llm_name: str, llm_answered: bool = True) -> str:
+    """The line under an agent answer saying what it drew on. The app's own words are not the LLM's.
+
+    llm_answered=False: the LLM failed before writing anything and the app wrote the reply itself (the live app
+    said "Gemini's general knowledge" under a reply Gemini never wrote)."""
     asked = next((s["result"]["question"] for s in steps
                   if not s["is_error"] and isinstance(s.get("result"), dict) and s["result"].get("question")), None)
     if asked and text.strip() == asked.strip():
         return ("Question written by the app from your words (classify_event); "
                 f"no model has run yet and {llm_name} did not write it.")
     used = sorted({s["detail"].split("`")[1] for s in steps if not s["is_error"]})
+    if not llm_answered:
+        return (f"Written by the app, not {llm_name}: {llm_name} did not answer. "
+                + (f"Tool results shown: {', '.join(used)}." if used else "No tool or model ran on this message."))
     if used:
         return (f"Based on {len(used)} tool result{'s' if len(used) != 1 else ''} ({', '.join(used)}) "
                 f"and {llm_name}'s general knowledge where the answer says so.")
