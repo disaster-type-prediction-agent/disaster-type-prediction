@@ -1,0 +1,63 @@
+# Runs the test suite on every push and pull request, and moves the `deploy` branch to a commit of
+# agentic-ai-auditor only once its tests pass. The live app (Streamlit Cloud) deploys from `deploy`, so
+# code whose tests fail never reaches it: the app keeps running the last green commit.
+# Tests are offline (no Gemini or Anthropic calls, see tests/conftest.py), so no secrets are needed.
+name: tests
+
+on:
+  push:
+    branches-ignore: [deploy]  # deploy only ever holds commits that already passed here
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true  # a newer push supersedes an older run, so an old commit can't be promoted late
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # the version the models in models/ were saved and tested with
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -p no:cacheprovider
+
+  promote:
+    needs: pytest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/agentic-ai-auditor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # only this job may push, and only to the deploy branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Move deploy to this commit
+        run: |
+          git fetch origin agentic-ai-auditor
+          # Only the newest commit is promoted: if another push landed meanwhile, its own run promotes it.
+          if [ "$(git rev-parse origin/agentic-ai-auditor)" != "$GITHUB_SHA" ]; then
+            echo "agentic-ai-auditor moved on since $GITHUB_SHA; leaving deploy to the newer run."
+            exit 0
+          fi
+          # Forced: Streamlit Cloud adds its own "Added Dev Container Folder" commit to the branch it
+          # deploys from. deploy is a copy of tested code that nobody works on, so overwriting it is safe.
+          git push --force origin "$GITHUB_SHA:refs/heads/deploy"
+          echo "deploy -> $GITHUB_SHA"
