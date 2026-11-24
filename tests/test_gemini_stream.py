@@ -83,4 +83,4 @@ def test_gemini_model_setting_goes_first(clean_env):
 
 def test_no_key_uses_the_local_engine(clean_env):
     reply = "".join(DisasterAuditorLLM("gemini", "").chat_stream("hello"))
-    assert "Disaster Auditor AI" in reply
+    assert "no LLM wrote it" in reply and "AI" not in reply.split(".")[0]

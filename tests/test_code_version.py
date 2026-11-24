@@ -59,3 +59,25 @@ def test_sidebar_shows_the_running_version(app):
     at.run()
     commit = build_info()["commit"]
     assert any(commit and commit in c.value for c in at.sidebar.caption)
+
+
+def test_start_screen_greets_by_time_and_says_what_the_app_does(app):
+    at = app({})
+    at.run()
+    html = " ".join(h.proto.body for h in at.get("html"))
+    assert "Describe a disaster, or pick a test case below." in html
+    assert "Which disaster model shall we audit" not in html
+
+
+def test_greeting_follows_the_given_clock():
+    import ast
+    from datetime import datetime
+    # greeting_text lives in app.py, which runs the whole app on import: load just that function
+    src = open("app.py").read()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "greeting_text")
+    scope = {"datetime": datetime}
+    exec(compile(ast.Module([fn], []), "app.py", "exec"), scope)
+    greet = scope["greeting_text"]
+    assert greet(datetime(2026, 11, 24, 8)) == "Good morning"
+    assert greet(datetime(2026, 11, 24, 14)) == "Good afternoon"
+    assert greet(datetime(2026, 11, 24, 21)) == "Good evening"

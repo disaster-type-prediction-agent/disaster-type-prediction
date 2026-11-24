@@ -297,34 +297,34 @@ class DisasterAuditorLLM:
     def _stream_local_fallback(self, user_message: str, current_case: Optional[Dict]) -> Generator[str, None, None]:
         msg = user_message.lower()
         if "thai" in msg or any("\u0e00" <= c <= "\u0e7f" for c in user_message):
-            # Thai fallback
-            resp = "สวัสดีครับ! ผมคือ **Disaster Auditor AI**\n\n"
+            # Thai: say plainly that no LLM wrote this, then only what the app really has
+            resp = "ตอนนี้ Gemini ไม่ได้ตอบข้อความนี้ ข้อความด้านล่างเป็นสรุปที่แอปเขียนเอง (ไม่ได้ใช้ LLM)\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"สำหรับเคสปัจจุบัน **`{c['case_id']}`** (เหตุการณ์จริง: **{c['ground_truth_class'] or 'ยังไม่ระบุ'}** ที่ประเทศ {c['summary']['country']}):\n"
+                resp += f"เคสล่าสุด **`{c['case_id']}`** (ประเภทจริง: **{c['ground_truth_class'] or 'ยังไม่ยืนยัน'}**, ประเทศ {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
                     c_status = "ยังไม่ยืนยันเฉลย" if m_data["is_correct"] is None else "ถูกต้อง ✓" if m_data["is_correct"] else "ทำนายผิด ✗"
                     resp += f"• **{m_name}**: ทำนายเป็น `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
-                resp += "\n💡 *คำแนะนำ: คุณสามารถใส่ **Gemini API Key** ในแท็บ Settings ที่แถบเมนูด้านซ้าย เพื่อเปิดการสนทนาและวิเคราะห์เชิงลึกด้วย LLM ได้แบบเรียลไทม์ครับ*"
+                resp += "\nถ้าจะถามต่อเป็นภาษาธรรมชาติ ใส่ Gemini API key ใน **Settings** ที่แถบด้านซ้าย"
             else:
-                resp += "ระบบกำลังทำงานในโหมด **Local Benchmark Engine** (โมเดล Random Forest, LightGBM, และ XGBoost พร้อมใช้งาน)\n\n"
-                resp += "คุณสามารถ:\n"
-                resp += "1. คลิกปุ่ม **Quick Actions** ด้านบน (เช่น 🎲 Random Case หรือ ⚡ Disagreement Case)\n"
-                resp += "2. พิมพ์คำสั่ง เช่น `/random`, `/hard`, `/compare`\n"
-                resp += "3. ใส่ **Gemini API Key** ที่ Sidebar ซ้ายมือเพื่อเปิดใช้งานการถาม-ตอบอัจฉริยะด้วย Gemini ครับ"
+                resp += "โมเดล Random Forest, LightGBM และ XGBoost ยังทดสอบได้โดยไม่ต้องใช้ Gemini:\n"
+                resp += "1. กดปุ่มใต้ช่องพิมพ์ เช่น **Random case**, **Hard case** หรือ **Model disagreement**\n"
+                resp += "2. หรือพิมพ์คำสั่ง `/random`, `/hard`, `/compare`\n"
+                resp += "3. ถ้าจะเล่าเหตุการณ์เป็นข้อความเอง ต้องใส่ Gemini API key ใน **Settings** ที่แถบด้านซ้ายก่อน"
         else:
-            resp = "Hello! I am the **Disaster Auditor AI**.\n\n"
+            resp = "Gemini isn't answering this message, so this is the app's own summary (no LLM wrote it).\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"Regarding the active case **`{c['case_id']}`** (Ground Truth: **{c['ground_truth_class'] or 'not confirmed'}**, {c['summary']['country']}):\n"
+                resp += f"Latest case **`{c['case_id']}`** (true type: **{c['ground_truth_class'] or 'not confirmed'}**, {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
                     c_status = "UNVERIFIED" if m_data["is_correct"] is None else "CORRECT ✓" if m_data["is_correct"] else "MISCLASSIFIED ✗"
                     resp += f"• **{m_name}**: Predicted `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
-                resp += "\n💡 *Tip: Provide your **Gemini API Key** in the sidebar settings to unlock live generative dialogue and deep XAI explanations.*"
+                resp += "\nTo ask follow-up questions in plain language, add a Gemini API key under **Settings** in the sidebar."
             else:
-                resp += "The application is currently running with the **Local Zero-Leakage ML Engines** (Random Forest, LightGBM, XGBoost).\n\n"
-                resp += "You can test cases using the quick buttons above or slash commands like `/random` and `/compare`.\n"
-                resp += "To enable live natural language reasoning, enter your **Gemini API Key** in the sidebar."
+                resp += "The Random Forest, LightGBM and XGBoost models still work without Gemini:\n"
+                resp += "1. Pick a suggestion under the message box, such as **Random case**, **Hard case** or **Model disagreement**\n"
+                resp += "2. Or type `/random`, `/hard` or `/compare`\n"
+                resp += "3. To describe an event in your own words, first add a Gemini API key under **Settings** in the sidebar."
 
         # Simulate streaming chunks
         for word in resp.split(" "):

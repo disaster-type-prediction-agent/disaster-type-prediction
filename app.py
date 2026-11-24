@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -1247,8 +1248,15 @@ def handle_input(user_query):
         submit_question(user_query)
 
 
-def greeting_text():
-    hour = datetime.now().hour
+def greeting_text(now=None):
+    """Good morning/afternoon/evening by the viewer's clock: the server runs on UTC, 7 hours behind Thailand."""
+    if now is None:
+        now = datetime.now()
+        try:
+            now = datetime.now(ZoneInfo(st.context.timezone))
+        except Exception:  # no browser time zone (tests, bare mode): the server's clock is all there is
+            pass
+    hour = now.hour
     if hour < 12:
         return "Good morning"
     if hour < 18:
@@ -1268,7 +1276,7 @@ def render_chat(composer_placeholder):
             st.space("large")
             st.html(
                 f'<p class="greeting"><span class="greeting-mark">{APP_ICON.split("/")[1].strip(":")}</span>{greeting_text()}. '
-                "Which disaster model shall we audit?</p>"
+                "Describe a disaster, or pick a test case below.</p>"
             )
             st.space("medium")
             user_query = render_composer(composer_placeholder)
