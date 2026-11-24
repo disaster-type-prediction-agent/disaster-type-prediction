@@ -118,40 +118,29 @@ def test_the_confirmation_question_is_written_by_the_app():
     assert names_a_type("เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ") and not names_a_type("ใช่ไหมครับ")
 
 
-def test_a_reply_naming_the_type_is_replaced_by_the_apps_question(tools):
-    """Live app: Gemini asked "เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ", naming the type before the models ran."""
-    from google.genai import types
+def test_the_app_shows_its_question_without_asking_gemini_again(tools):
+    """Live app: asked to copy the question, Gemini named the type ("ขนาดของแผ่นดินไหว"), then reworded it and dropped
+    the averaging line. The app now shows its own question and ends the turn: no second Gemini request."""
     from tests.test_gemini_agent import call, chunk, run
 
     session = SessionCases()
     session.message = EXAMPLE
-    events, history, _ = run(tools, [[chunk(call("classify_event", country="Thailand", duration_days=0.007))],
-                                     [chunk(types.Part(text="เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ"))]],
-                             question=EXAMPLE, session=session)
-    text = ""
-    for kind, payload in events:
-        text = text + payload if kind == "text" else text[:-payload] if kind == "retract" else text
+    # A second scripted reply that would name the type, if the app ever asked Gemini for one.
+    from google.genai import types
+    events, history, client = run(tools, [[chunk(call("classify_event", country="Thailand", duration_days=0.007))],
+                                          [chunk(types.Part(text="เป็นการวัดขนาดของแผ่นดินไหวใช่ไหมครับ"))]],
+                                  question=EXAMPLE, session=session)
     tool = next(p for k, p in events if k == "tool")
-    assert text == tool["result"]["question"] and not tool["result"]["question"].count("แผ่นดินไหว")
-    assert history[-1].parts[0].text == text  # the transcript holds what the user saw
+    question = tool["result"]["question"]
+    assert len(client.requests) == 1
+    assert "".join(p for k, p in events if k == "text") == question
+    assert "แผ่นดินไหว" not in question and "ระบบจะเฉลี่ย" in question
+    assert not [p for k, p in events if k == "error"]
+    assert [c.role for c in history] == ["user", "model", "user", "model"] and history[-1].parts[0].text == question
 
-    # A reply that names no type is left as Gemini wrote it.
-    session = SessionCases()
-    session.message = EXAMPLE
-    events, _, _ = run(tools, [[chunk(call("classify_event", country="Thailand"))],
-                               [chunk(types.Part(text="บ้านสั่นนี้ วัดเป็นแรงสั่นสะเทือนใช่ไหมครับ"))]],
-                       question=EXAMPLE, session=session)
-    assert "".join(p for k, p in events if k == "text") == "บ้านสั่นนี้ วัดเป็นแรงสั่นสะเทือนใช่ไหมครับ"
-
-
-def test_the_question_is_asked_even_when_gemini_fails(tools):
-    """Live run: Gemini timed out right after classify_event asked, and the user saw only an error."""
-    from tests.test_gemini_agent import call, chunk, run, server_error
-
-    session = SessionCases()
-    session.message = EXAMPLE
-    events, history, _ = run(tools, [[chunk(call("classify_event", country="Thailand"))], server_error(), server_error()],
-                             question=EXAMPLE, session=session)
-    tool = next(p for k, p in events if k == "tool")
-    assert "".join(p for k, p in events if k == "text") == tool["result"]["question"]
-    assert not [p for k, p in events if k == "error"] and history[-1].role == "model"
+    # The answer goes to Gemini as usual, and the models run.
+    session.message = "ไม่แน่ใจครับ"
+    events, _, client = run(tools, [[chunk(call("classify_event", country="Thailand"))],
+                                    [chunk(types.Part(text="Random Forest predicted Drought."))]],
+                            question="ไม่แน่ใจครับ", history=history, session=session)
+    assert len(client.requests) == 2 and next(p for k, p in events if k == "tool")["audit"]["case"]["scale_not_given"]
