@@ -15,8 +15,8 @@
 - Ran the models via classify_event: **80/80** (100%)
 - All 6 attributes read correctly: **76/80**
 - Attributes read correctly overall: **98.8%**
-- Asked the user for more details first (too little given): **18/80**
-- Explanations matching the model output: **79/80**
+- Asked the user for more details first (too little given): **19/80**
+- Explanations matching the model output: **75/77**
 - Gemini requests per case: 2.5 on average (writer + agent rounds + fallbacks)
 
 | Attribute | Read correctly |

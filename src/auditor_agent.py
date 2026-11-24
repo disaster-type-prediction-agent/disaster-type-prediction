@@ -82,6 +82,10 @@ def _close_dangling_tool_calls(history: List[Dict[str, Any]], reason: str) -> No
         ]})
 
 
+# Zero written as a word: "18 days of zero degree temperatures" (typed eval CASE-0886) is a real 0, not "no figure".
+_ZERO_WORD = re.compile(r"(?<![a-z])zero(?![a-z])|ศูนย์", re.IGNORECASE)
+
+
 def _numbers(text: str) -> set:
     """The numbers written in a message ("6,3" and "6.3" both count)."""
     return {float(n.replace(",", ".")) for n in re.findall(r"\d+(?:[.,]\d+)?", text or "")}
@@ -385,7 +389,7 @@ class AuditorTools:
                 event["start_month"] = None
                 notes.append("start_month was dropped: the user's words name no month.")
             value = event["magnitude_value"]
-            if value == 0 and 0 not in _numbers(text):
+            if value == 0 and 0 not in _numbers(text) and not _ZERO_WORD.search(text or ""):
                 # "พื้นที่…แต่ไม่มีการระบุตัวเลข" (no figure) came back as magnitude_value 0 (typed eval CASE-1225):
                 # a zero the user never wrote is "no figure", in any language.
                 notes.append("magnitude_value 0 was dropped: the user gave no figure.")

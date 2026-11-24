@@ -332,3 +332,9 @@ def test_typed_eval_regressions_after_the_quote_checks(tools):
                               country="Peru", start_month=3, duration_days=3, magnitude_scale="Vaccinated",
                               magnitude_value=0)
     assert audit["case"]["event"]["magnitude_value"] == 0
+    # Zero written as a word stays too (typed eval CASE-0886).
+    for msg in ["It has been 18 days of zero degree temperatures starting this January in the State of Palestine, Asia.",
+                "อุณหภูมิศูนย์องศาที่ปาเลสไตน์ 18 วัน ตั้งแต่เดือนมกราคม"]:
+        _, _, audit, _ = classify(tools, SessionCases(), msg, country="State of Palestine", start_month=1,
+                                  duration_days=18, magnitude_scale="°C", magnitude_value=0)
+        assert audit["case"]["event"]["magnitude_value"] == 0, msg
