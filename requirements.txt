@@ -1,12 +1,18 @@
-streamlit>=1.30.0
-pandas>=2.0.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
-imbalanced-learn>=0.12.0
-xgboost>=2.0.0
-lightgbm>=4.0.0
-shap>=0.44.0
-joblib>=1.3.0
-anthropic>=0.40.0
-google-genai>=0.1.0
-python-dotenv>=1.0.0
+# App + LLM clients pinned to the versions the app was built and tested with, so a fresh
+# Streamlit Cloud deploy gets the same environment instead of whatever was released that day.
+# The UI's CSS and slash-command menu rely on Streamlit's internal test ids; bump deliberately.
+streamlit==1.66.1
+anthropic==2.3.0
+google-genai==3.0.0
+python-dotenv==1.2.4
+
+# ML stack pinned to the versions that saved models/*.joblib: pickled pipelines can fail to
+# load (or silently change behaviour) under a different scikit-learn / LightGBM / XGBoost.
+scikit-learn==1.9.1
+imbalanced-learn==0.14.2
+lightgbm==4.7.0
+xgboost==3.4.1
+shap==0.54.1
+joblib==1.6.0
+numpy==2.5.4
+pandas==3.1.0

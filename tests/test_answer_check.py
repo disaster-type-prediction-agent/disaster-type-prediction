@@ -1,0 +1,71 @@
+"""The explanation check: an LLM answer must agree with what the ML model actually said."""
+import pytest
+
+from src.answer_check import check_answer, mentions_class
+from src.event_features import make_event_case
+
+
+@pytest.fixture(scope="module")
+def audit(registry):
+    case = make_event_case({"country": "Thailand", "region": "Asia", "magnitude_value": 120, "magnitude_scale": "Kph"},
+                           registry.feature_names, "EVENT-1")
+    return registry.audit_case(case, ["Random Forest"])
+
+
+def kph_share(audit):
+    return next(r["share"] for r in audit["models"]["Random Forest"]["shap"]["by_attribute"] if r["attribute"] == "Magnitude scale")
+
+
+def test_faithful_answer_passes(audit):
+    conf = audit["models"]["Random Forest"]["prediction"]["confidence"] * 100
+    text = f"โมเดลทายว่าเป็นพายุ ({conf:.1f}%) เพราะหน่วย Kph มีผล {kph_share(audit):.0f}% ของหลักฐาน"
+    assert check_answer(text, [audit]) == {"ok": True, "issues": []}
+
+
+def test_wrong_class_is_flagged(audit):
+    result = check_answer("The model predicted Flood.", [audit])
+    assert not result["ok"] and "Storm" in result["issues"][0]
+
+
+def test_invented_percentage_is_flagged(audit):
+    result = check_answer("Storm, with 73.4% confidence.", [audit])
+    assert not result["ok"] and "73.4%" in result["issues"][0]
+
+
+@pytest.mark.parametrize("text", [
+    "Storm. Accuracy is 91.7% (95% CI: [0.90, 0.93]).",
+    "Storm. Accuracy is 91.7%, 95% confidence interval 90-93.",
+    "พายุ ความแม่นยำ 91.7% (ช่วงความเชื่อมั่น 95%)",
+])
+def test_confidence_interval_level_is_not_a_quoted_figure(audit, registry, text):
+    assert check_answer(text, [audit], [registry.leaderboard])["ok"]
+
+
+def test_invented_figure_next_to_ci_is_still_flagged(audit, registry):
+    result = check_answer("Storm. Accuracy is 97.2% (95% CI).", [audit], [registry.leaderboard])
+    assert not result["ok"] and result["issues"] == ["quotes 97.2% not found in the model output"]
+
+
+def test_quoted_benchmark_figures_are_allowed(audit, registry):
+    text = "Storm. Overall the Random Forest scores 91.7% accuracy."
+    assert check_answer(text, [audit], [registry.leaderboard])["ok"]
+
+
+def test_metrics_only_answer_is_checked_on_figures(registry):
+    assert check_answer("Accuracy is 91.7%.", [], [registry.leaderboard])["ok"]
+    assert not check_answer("Accuracy is 97.2%.", [], [registry.leaderboard])["ok"]
+    assert check_answer("No numbers here.", [], [registry.leaderboard]) is None
+
+
+def test_thai_class_names_count():
+    assert mentions_class("น่าจะเป็นอุทกภัย", "Flood") and mentions_class("ไฟป่า", "Wildfire")
+
+
+def test_a_true_bound_passes_and_a_false_one_is_flagged(audit):
+    conf = audit["models"]["Random Forest"]["prediction"]["confidence"] * 100
+    below = int(conf) - 1
+    assert check_answer(f"Storm, with over {below}% confidence.", [audit])["ok"]
+    assert check_answer(f"Storm (>{below}%).", [audit])["ok"]
+    assert check_answer(f"พายุ ด้วยความมั่นใจมากกว่า {below}%", [audit])["ok"]
+    result = check_answer("Storm, with more than 101% confidence.", [audit])
+    assert not result["ok"] and ">101%" in result["issues"][0]

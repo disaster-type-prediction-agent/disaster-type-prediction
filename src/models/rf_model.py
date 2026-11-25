@@ -5,7 +5,7 @@ import pandas as pd
 import shap
 from typing import Dict, Any, List, Optional
 from src.models.base import BaseDisasterModel
-from src.models.utils import CLASS_NAMES, format_human_explanations
+from src.models.utils import CLASS_NAMES
 
 class RandomForestModel(BaseDisasterModel):
     def __init__(self, pipeline_path: str = "models/rf_pipeline.joblib", meta_path: str = "models/multi_model_metadata.json"):
@@ -51,30 +51,7 @@ class RandomForestModel(BaseDisasterModel):
         else:
             class_shap = raw_shap[0]
 
-        contributions = []
-        for feat, val, s_val in zip(self.feature_names, df.iloc[0], class_shap):
-            contributions.append({
-                "feature": feat,
-                "value": float(val),
-                "shap_value": round(float(s_val), 4),
-                "direction": "positive" if s_val > 0 else "negative",
-                "abs_impact": abs(float(s_val))
-            })
-
-        sorted_contribs = sorted(contributions, key=lambda x: x["abs_impact"], reverse=True)
-        top_pos = [c for c in sorted_contribs if c["direction"] == "positive"][:top_k]
-        top_neg = [c for c in sorted_contribs if c["direction"] == "negative"][:top_k]
-        top_all = sorted_contribs[:top_k]
-        target_name = CLASS_NAMES[pred_id]
-
-        return {
-            "target_class": target_name,
-            "target_id": pred_id,
-            "top_positive": top_pos,
-            "top_negative": top_neg,
-            "top_all": top_all,
-            "human_explanations": format_human_explanations(top_all, target_name)
-        }
+        return self._package_shap(self.feature_names, features, class_shap, pred_id, top_k)
 
     def metrics(self) -> Dict[str, Any]:
         return self._metrics

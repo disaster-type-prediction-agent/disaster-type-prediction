@@ -1,0 +1,38 @@
+# Runs the test suite on every push and pull request.
+# The live app (Streamlit Cloud) deploys straight from agentic-ai-auditor, in parallel with this run, so a
+# red run here means the app may already be running the broken commit: fix forward or revert promptly.
+# (Streamlit Community Cloud can't switch an existing app's branch, so there is no gated deploy branch.)
+# Tests are offline (no Gemini or Anthropic calls, see tests/conftest.py), so no secrets are needed.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # the version the models in models/ were saved and tested with
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -p no:cacheprovider

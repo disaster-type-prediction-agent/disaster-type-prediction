@@ -1,7 +1,9 @@
 import os
 import json
+import re
+import threading
 import time
-from typing import Dict, Any, List, Optional, Generator
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 SYSTEM_PROMPT = """You are the "Disaster Auditor Agent", an expert AI specializing in natural disaster classification, machine learning evaluation, and Explainable AI (SHAP).
 
@@ -18,14 +20,176 @@ THE 3 LEAK-FREE MODELS COMPARED:
 3. XGBoost (SMOTETomek Pipeline): Test Macro-F1 = 0.8480, Accuracy = 91.47%, Recall = 86.62% (Regularized depth-wise gradient boosting).
 - Disagreement rate: The 3 models disagree on 251 out of 3,495 cases (7.2%), mostly on boundary confusions like Flood vs. Storm during monsoon seasons or Drought vs. Extreme Temperature.
 
+MODEL INPUTS (245 features from 6 pre-event attributes):
+- Country (230 one-hot columns), magnitude scale (6 one-hot: Km2, Kph, Moment Magnitude, Vaccinated, °C, Unknown), region (5 one-hot), start month (1-12), event duration (log1p of days scaled 0-1), magnitude value (log1p scaled 0-1, plus a missing flag).
+- No impact data (deaths, damage) is used, to avoid leakage. The magnitude scale is the strongest signal because each hazard is measured in its own unit.
+
+WHERE YOUR ANSWERS COME FROM:
+- Facts about the models and metrics: only the figures above.
+- Facts about a case: only the CURRENT AUDIT CASE CONTEXT below, if present.
+- Anything else (disaster science, history, general ML): your own general knowledge. When an answer relies on it, say so briefly (e.g. "From general knowledge, not the app's data: ..."). Never invent metrics, case details or SHAP values.
+
 GUIDELINES:
 - Answer user questions informatively, clearly, and authoritatively.
-- Support both Thai and English naturally: if the user asks in Thai, reply in fluent, polite Thai (ครับ/ค่ะ); if in English, reply in English.
+- Be concise: lead with the answer, then at most 3-5 short bullets or ~150 words, unless the user asks for more detail.
+- Reply in the language of the LATEST user question, whatever language it is (follow its [Reply language] note), not the language of earlier turns; polite Thai (ครับ/ค่ะ) for Thai. In English replies write each disaster class in English only (Landslide, never 滑坡 (Landslide)). In any other language, write the class in that language with its English name in brackets, e.g. in Thai ดินถล่ม (Landslide).
 - If an active audit case is provided in the context, refer to its specific metrics, ground truth, predicted class, confidence, and SHAP features.
+- READING SHAP: use the "SHAP by attribute" % shares in the context. Compare models by these shares only (raw SHAP units differ: probability for Random Forest, log-odds for LightGBM/XGBoost). An attribute marked as a filled-in default was not given by the user: never present it as a reason for the prediction; instead say the prediction may change once the user supplies it, and invite them to.
+- WHY NOT ANOTHER CLASS: when a model is WRONG, use its "Why not <true type>?" lines: name what held the true type back and what evidence both classes share. Use the runner-up lines when asked why the model didn't pick something else.
 - If asked about how models work or error diagnostics, explain the physical and seasonal disaster dynamics (e.g. why missing magnitude scales sway models toward floods, or how event duration influences epidemics vs. earthquakes)."""
 
+# Fast, current models in order of preference (measured on this project: ~1-2s to the first word).
+# Override with GEMINI_MODEL in .streamlit/secrets.toml or the environment, e.g. "gemini-3.5-flash"
+# or a comma-separated list.
+DEFAULT_GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
+GEMINI_TIMEOUT_MS = 30_000
+HISTORY_TURNS = 10  # earlier chat turns sent with each question
+
+# Yielded by chat_stream when a model failed mid-answer and the next one starts over: drop the text so far.
+RESTART = object()
+
+
+def gemini_models() -> List[str]:
+    configured = [m.strip() for m in os.getenv("GEMINI_MODEL", "").split(",") if m.strip()]
+    return configured + [m for m in DEFAULT_GEMINI_MODELS if m not in configured]
+
+
+THAI_CHARS = re.compile(r"[\u0e00-\u0e7f]")
+LATIN_LETTERS = re.compile(r"[A-Za-z]")
+WORDS = re.compile(r"[A-Za-z']+")
+# Common English words: Latin-script text with several of these is English; other Latin text
+# (French, Indonesian, Spanish, ...) is left to the LLM to recognise.
+ENGLISH_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "what", "why", "how", "which", "who", "when", "where",
+    "does", "do", "did", "can", "could", "would", "should", "will", "in", "on", "of", "for", "to", "and", "or",
+    "not", "with", "from", "this", "that", "it", "its", "model", "models", "about", "me", "my", "you", "your",
+    "give", "show", "tell", "explain", "case", "than", "better", "best", "there", "say", "lasted", "days",
+}
+
+
+def reply_language(text: str) -> str:
+    """The language of THIS message: "Thai", "English", or "other" (any other language), decided in code.
+
+    Left to the LLM, earlier turns pull the reply into their language (an English question after Thai
+    turns came back in Thai). Mixed messages like "ทำไมไม่ใช่ Flood" count as Thai; a Thai place name
+    inside an English sentence does not."""
+    thai, latin = len(THAI_CHARS.findall(text)), len(LATIN_LETTERS.findall(text))
+    if thai and thai * 2 >= latin:
+        return "Thai"
+    letters = sum(ch.isalpha() for ch in text)
+    words = [w.lower() for w in WORDS.findall(text)]
+    if letters and latin >= 0.8 * letters and words:
+        english = sum(w in ENGLISH_WORDS for w in words)
+        if english >= 2 or english / len(words) >= 0.3 or len(words) <= 3:
+            return "English"
+    return "other" if letters else "English"
+
+
+CLASS_NAME_RULE = ("Name each disaster class in the reply's language followed by its English name in brackets, "
+                   "e.g. 地震 (Earthquake), Inondation (Flood).")
+
+
+def language_note(text: str) -> str:
+    """A per-turn instruction appended to the question, so the reply follows the latest message."""
+    lang = reply_language(text)
+    if lang == "Thai":
+        return "[Reply language: Thai. Answer in polite Thai (ครับ/ค่ะ), whatever language earlier turns used.]"
+    if lang == "English":
+        return "[Reply language: English. Answer in English, even if earlier turns were in another language, with disaster classes in English only (no other script).]"
+    # A Vietnamese message naming "Thái Lan" came back in Thai: say which language it is not.
+    return ("[Reply language: the language of the latest user message above (not English unless it is English, "
+            "not Thai unless it is written in Thai script, and not the language of earlier turns or of a place it "
+            "names). Answer entirely in that language. " + CLASS_NAME_RULE + "]")
+
+
+
+def agent_turn_text(question: str, context_parts) -> str:
+    """The text the tool-using agent gets for one user turn, the same in the app and the typed evaluation.
+
+    The UI context is labelled as app state and the user's words follow a "User message:" label. Run
+    together ("[UI context] selected models: Random Forest" then the message), Gemini dropped the country
+    from "In the Philippines, ..." in 3 of 3 tries; labelled, it passed every stated value."""
+    context = "; ".join(p for p in context_parts if p)
+    head = f"[UI context, app state, not the user's words: {context}]\n\n" if context else ""
+    return f"{head}User message:\n{question}\n\n{language_note(question)}"
+
+# Usage hook: the app sets one per script run (thread-local, so sessions don't mix) to count calls
+# against its quota guard. Called with "call" for every request and "quota" when Gemini answers 429.
+_usage = threading.local()
+
+
+def set_usage_hook(hook: Optional[Callable[[str], None]]) -> None:
+    _usage.hook = hook
+
+
+def _report(kind: str) -> None:
+    hook = getattr(_usage, "hook", None)
+    if hook:
+        hook(kind)
+
+
+def _is_quota_error(e: Exception) -> bool:
+    return getattr(e, "code", None) == 429
+
+
+class _CountedModels:
+    """client.models with every request reported to the usage hook (the app's quota guard)."""
+
+    def __init__(self, models):
+        self._models = models
+
+    def generate_content(self, **kwargs):
+        _report("call")
+        try:
+            return self._models.generate_content(**kwargs)
+        except Exception as e:
+            if _is_quota_error(e):
+                _report("quota")
+            raise
+
+    def generate_content_stream(self, **kwargs):
+        _report("call")
+        try:
+            yield from self._models.generate_content_stream(**kwargs)
+        except Exception as e:
+            if _is_quota_error(e):
+                _report("quota")
+            raise
+
+
+class _CountedClient:
+    def __init__(self, client):
+        # Keep the real client alive: genai.Client closes its HTTP connection when garbage-collected,
+        # and holding only client.models would let that happen mid-request.
+        self._client = client
+        self.models = _CountedModels(client.models)
+
+
+def make_gemini_client(api_key: str):
+    """Every Gemini request in the app goes through this client, so every one is counted."""
+    return _CountedClient(_make_raw_client(api_key))
+
+
+def _make_raw_client(api_key: str):
+    from google import genai
+    from google.genai import types
+
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            # Give up on a stalled model after 30s instead of waiting minutes, and don't let the
+            # SDK silently retry an overloaded model: callers fall back down gemini_models() instead.
+            timeout=GEMINI_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
+
+
 class DisasterAuditorLLM:
-    """Multi-provider LLM interface supporting Google Gemini and Anthropic Claude."""
+    """Plain chat via Google Gemini, or a local summary when no key is set.
+
+    Claude runs as a tool-using agent instead; see src/auditor_agent.py.
+    """
 
     def __init__(self, provider: str = "gemini", api_key: Optional[str] = None):
         self.provider = provider.lower()
@@ -38,153 +202,129 @@ class DisasterAuditorLLM:
 
         if self.provider == "gemini" and self.api_key:
             yield from self._stream_gemini(prompt)
-        elif self.provider == "anthropic" and self.api_key:
-            yield from self._stream_anthropic(user_message, history or [], current_case)
         else:
             yield from self._stream_local_fallback(user_message, current_case)
 
     @staticmethod
     def _case_context(current_case: Optional[Dict]) -> str:
-        context_str = ""
-        if current_case:
-            case_info = current_case.get("case", {})
-            models_info = current_case.get("models", {})
-            context_str = f"\n\nCURRENT AUDIT CASE CONTEXT:\n- Case ID: {case_info.get('case_id')}\n- Ground Truth: {case_info.get('ground_truth_class')}\n- Location: {case_info.get('summary', {}).get('country')} ({case_info.get('summary', {}).get('region')})\n- Timing: Month {case_info.get('summary', {}).get('start_month')}\n- Magnitude Scale: {case_info.get('summary', {}).get('magnitude_scale')}\n"
-            for m_name, m_data in models_info.items():
-                context_str += f"- {m_name} Prediction: {m_data['prediction']['predicted_class']} (Confidence: {m_data['prediction']['confidence']*100:.1f}%, Correct: {m_data['is_correct']})\n"
-                context_str += f"  Top SHAP features: {', '.join([f['feature'] for f in m_data['shap'].get('top_all', [])[:3]])}\n"
-        return context_str
+        """Everything the models saw and said about the case on screen, so Gemini explains from data, not guesses."""
+        if not current_case:
+            return ""
+        from src.event_features import case_attribute_values
+
+        case = current_case.get("case", {})
+        filled = set(case.get("filled", []))
+        source = "an event the user described" if case.get("source") == "user" else "the held-out test bank"
+        truth = case.get("ground_truth_class") or "not confirmed by the user yet"
+        lines = [f"\n\nCURRENT AUDIT CASE CONTEXT ({source}):", f"- Case ID: {case.get('case_id')}", f"- Ground truth: {truth}",
+                 "- The 6 attributes the models saw:"]
+        first = next(iter(current_case.get("models", {}).values()), {}).get("prediction")
+        for name, value in case_attribute_values(case, first).items():
+            note = "  [NOT GIVEN by the user: training default filled in]" if name in filled else ""
+            lines.append(f"    {name}: {value}{note}")
+
+        for m_name, m in current_case.get("models", {}).items():
+            pred = m["prediction"]
+            correct = "unverified" if m["is_correct"] is None else ("correct" if m["is_correct"] else "WRONG")
+            top = sorted(pred.get("probabilities", {}).items(), key=lambda kv: kv[1], reverse=True)[:3]
+            lines.append(f"- {m_name}: predicted {pred['predicted_class']} ({pred['confidence'] * 100:.1f}%, {correct}); "
+                         f"top probabilities: " + ", ".join(f"{c} {v * 100:.0f}%" for c, v in top))
+            rows = m["shap"].get("by_attribute", [])
+            if rows:
+                lines.append(f"  SHAP by attribute for {m['shap']['target_class']} (% share of this model's total evidence; + pushes toward, - away):")
+                for r in rows:
+                    note = " [filled-in default: an artefact, not a reason]" if r.get("filled") else ""
+                    lines.append(f"    {r['attribute']} = {r['value']}: {r['share']:+.1f}%{note}")
+            contrast = m.get("contrast")
+            if contrast:
+                lines.append(f"  Why not {contrast['class']} ({contrast['reason']}, {(contrast['probability'] or 0) * 100:.0f}%)? "
+                             f"SHAP by attribute toward {contrast['class']}: "
+                             + ", ".join(f"{r['attribute']} {r['share']:+.0f}%" for r in contrast["by_attribute"]))
+                lines.append("    " + "; ".join(contrast["human_explanations"]))
+
+        guess = current_case.get("llm")
+        if guess:
+            lines.append(f"- Gemini's own guess from the same 6 attributes: {guess['predicted_class']} ({guess['reason']})")
+        return "\n".join(lines) + "\n"
 
     def _build_prompt(self, user_message: str, history: List[Dict[str, str]], current_case: Optional[Dict]) -> str:
         context_str = self._case_context(current_case)
-        full_prompt = f"{SYSTEM_PROMPT}\n{context_str}\n\nUser Question:\n{user_message}"
-        return full_prompt
+        # Recent turns so follow-up questions ("why?", "and XGBoost?") make sense.
+        recent = [h for h in history if h.get("content")][-HISTORY_TURNS:]
+        convo = "".join(f"{h['role'].upper()}: {h['content'][:1500]}\n" for h in recent)
+        convo_str = f"\n\nCONVERSATION SO FAR:\n{convo}" if convo else ""
+        return f"{SYSTEM_PROMPT}\n{context_str}{convo_str}\n\nUser Question:\n{user_message}\n\n{language_note(user_message)}"
 
     def _stream_gemini(self, prompt: str) -> Generator[str, None, None]:
+        """Stream from a pinned, fast model; fall back down a short list only if a model fails before answering.
+
+        The old version listed every model on the key before each request and tried them in API order,
+        so it burned seconds on retired (404) and image-only models and could land on an overloaded or
+        very slow model (one took 200s to start). Pinning avoids all of that.
+        """
         try:
             from google import genai
-            client = genai.Client(api_key=self.api_key)
-            
-            # Prioritize latest recommended model (gemini-3.8-flash)
-            models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-            try:
-                # Dynamically discover active models on this key
-                discovered = []
-                for m in client.models.list():
-                    m_id = getattr(m, "name", "") or ""
-                    clean_id = m_id.replace("models/", "")
-                    if "flash" in clean_id.lower() or "pro" in clean_id.lower():
-                        discovered.append(clean_id)
-                if discovered:
-                    # Put preferred 3.8-flash first if found, else discovered list
-                    if "gemini-3.8-flash" in discovered:
-                        discovered.remove("gemini-3.8-flash")
-                        discovered.insert(0, "gemini-3.8-flash")
-                    models_to_try = discovered + [m for m in models_to_try if m not in discovered]
-            except Exception:
-                pass
-
-            last_err = None
-            for model_name in models_to_try:
-                try:
-                    response = client.models.generate_content_stream(
-                        model=model_name,
-                        contents=prompt
-                    )
-                    for chunk in response:
-                        if hasattr(chunk, "text") and chunk.text:
-                            yield chunk.text
-                    return
-                except Exception as e:
-                    last_err = e
-                    continue
-
-            # If all fail, yield error
-            yield f"\n⚠️ Gemini API Error: {str(last_err)}. Please verify your Gemini API key in the sidebar."
-        except Exception as e:
-            yield f"\n⚠️ Gemini Connection Error: {str(e)}"
-
-    def _stream_anthropic(self, user_message: str, history: List[Dict[str, str]], current_case: Optional[Dict]) -> Generator[str, None, None]:
-        try:
-            import anthropic
+            from google.genai import types
         except ImportError:
-            yield "\n⚠️ The `anthropic` package is not installed. Run `pip install -r requirements.txt`."
+            yield "\n⚠️ The `google-genai` package is not installed. Run `pip install -r requirements.txt`."
             return
 
-        client = anthropic.Anthropic(api_key=self.api_key)
+        client = make_gemini_client(self.api_key)
 
-        # Recent turns only; the API requires the first message to be from the user.
-        messages = [
-            {"role": h["role"], "content": h["content"]}
-            for h in history[-6:]
-            if h.get("content") and h.get("role") in ("user", "assistant")
-        ]
-        while messages and messages[0]["role"] != "user":
-            messages.pop(0)
+        # Gemini's fast models answer ~1 in 5 requests with "503 high demand", sometimes mid-answer.
+        # Each failure moves on to the next model; if text was already shown, RESTART tells the
+        # caller to clear it so the user sees one clean answer.
+        last_err = None
+        for model_name in gemini_models():
+            started = False
+            try:
+                for chunk in client.models.generate_content_stream(model=model_name, contents=prompt):
+                    if getattr(chunk, "text", None):
+                        started = True
+                        yield chunk.text
+                return
+            except Exception as e:
+                last_err = e
+                if started:
+                    yield RESTART
 
-        context_str = self._case_context(current_case)
-        user_content = f"{context_str}\nUser Question:\n{user_message}" if context_str else user_message
-        messages.append({"role": "user", "content": user_content})
+        yield f"\n⚠️ Gemini API Error: {last_err}. Please verify your Gemini API key in the sidebar."
 
-        try:
-            with client.beta.messages.stream(
-                model="claude-opus-5-5",
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                messages=messages,
-                # Conversational Q&A: low effort keeps latency and cost down.
-                output_config={"effort": "low"},
-                # If a request is declined by a safety classifier, retry on a fallback model server-side.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            ) as stream:
-                for text in stream.text_stream:
-                    yield text
-                final = stream.get_final_message()
-            if final.stop_reason == "refusal":
-                yield "\n⚠️ Claude declined to answer this request."
-            elif final.stop_reason == "max_tokens":
-                yield "\n⚠️ Response truncated (max_tokens reached)."
-        except anthropic.AuthenticationError:
-            yield "\n⚠️ Claude API Error: invalid Anthropic API key. Please check the key in the sidebar."
-        except anthropic.RateLimitError:
-            yield "\n⚠️ Claude API Error: rate limited. Please wait a moment and try again."
-        except anthropic.APIStatusError as e:
-            yield f"\n⚠️ Claude API Error ({e.status_code}): {e.message}"
-        except anthropic.APIConnectionError:
-            yield "\n⚠️ Claude Connection Error: could not reach the Anthropic API."
+    def local_answer(self, user_message: str, current_case: Optional[Dict]) -> Generator[str, None, None]:
+        """The built-in summary, without any LLM call (used when Gemini is off, busy or over its limit)."""
+        yield from self._stream_local_fallback(user_message, current_case)
 
     def _stream_local_fallback(self, user_message: str, current_case: Optional[Dict]) -> Generator[str, None, None]:
         msg = user_message.lower()
         if "thai" in msg or any("\u0e00" <= c <= "\u0e7f" for c in user_message):
-            # Thai fallback
-            resp = "สวัสดีครับ! ผมคือ **Disaster Auditor AI**\n\n"
+            # Thai: say plainly that no LLM wrote this, then only what the app really has
+            resp = "ตอนนี้ Gemini ไม่ได้ตอบข้อความนี้ ข้อความด้านล่างเป็นสรุปที่แอปเขียนเอง (ไม่ได้ใช้ LLM)\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"สำหรับเคสปัจจุบัน **`{c['case_id']}`** (เหตุการณ์จริง: **{c['ground_truth_class']}** ที่ประเทศ {c['summary']['country']}):\n"
+                resp += f"เคสล่าสุด **`{c['case_id']}`** (ประเภทจริง: **{c['ground_truth_class'] or 'ยังไม่ยืนยัน'}**, ประเทศ {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
-                    c_status = "ถูกต้อง ✓" if m_data["is_correct"] else "ทำนายผิด ✗"
+                    c_status = "ยังไม่ยืนยันเฉลย" if m_data["is_correct"] is None else "ถูกต้อง ✓" if m_data["is_correct"] else "ทำนายผิด ✗"
                     resp += f"• **{m_name}**: ทำนายเป็น `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
-                resp += "\n💡 *คำแนะนำ: คุณสามารถใส่ **Gemini API Key** ในแท็บ Settings ที่แถบเมนูด้านซ้าย เพื่อเปิดการสนทนาและวิเคราะห์เชิงลึกด้วย LLM ได้แบบเรียลไทม์ครับ*"
+                resp += "\nถ้าจะถามต่อเป็นภาษาธรรมชาติ ใส่ Gemini API key ใน **Settings** ที่แถบด้านซ้าย"
             else:
-                resp += "ระบบกำลังทำงานในโหมด **Local Benchmark Engine** (โมเดล Random Forest, LightGBM, และ XGBoost พร้อมใช้งาน)\n\n"
-                resp += "คุณสามารถ:\n"
-                resp += "1. คลิกปุ่ม **Quick Actions** ด้านบน (เช่น 🎲 Random Case หรือ ⚡ Disagreement Case)\n"
-                resp += "2. พิมพ์คำสั่ง เช่น `/random`, `/hard`, `/compare`\n"
-                resp += "3. ใส่ **Gemini API Key** ที่ Sidebar ซ้ายมือเพื่อเปิดใช้งานการถาม-ตอบอัจฉริยะด้วย Gemini ครับ"
+                resp += "โมเดล Random Forest, LightGBM และ XGBoost ยังทดสอบได้โดยไม่ต้องใช้ Gemini:\n"
+                resp += "1. กดปุ่มใต้ช่องพิมพ์ เช่น **Random case**, **Hard case** หรือ **Model disagreement**\n"
+                resp += "2. หรือพิมพ์คำสั่ง `/random`, `/hard`, `/compare`\n"
+                resp += "3. ถ้าจะเล่าเหตุการณ์เป็นข้อความเอง ต้องใส่ Gemini API key ใน **Settings** ที่แถบด้านซ้ายก่อน"
         else:
-            resp = "Hello! I am the **Disaster Auditor AI**.\n\n"
+            resp = "Gemini isn't answering this message, so this is the app's own summary (no LLM wrote it).\n\n"
             if current_case:
                 c = current_case["case"]
-                resp += f"Regarding the active case **`{c['case_id']}`** (Ground Truth: **{c['ground_truth_class']}**, {c['summary']['country']}):\n"
+                resp += f"Latest case **`{c['case_id']}`** (true type: **{c['ground_truth_class'] or 'not confirmed'}**, {c['summary']['country']}):\n"
                 for m_name, m_data in current_case["models"].items():
-                    c_status = "CORRECT ✓" if m_data["is_correct"] else "MISCLASSIFIED ✗"
+                    c_status = "UNVERIFIED" if m_data["is_correct"] is None else "CORRECT ✓" if m_data["is_correct"] else "MISCLASSIFIED ✗"
                     resp += f"• **{m_name}**: Predicted `{m_data['prediction']['predicted_class']}` ({m_data['prediction']['confidence']*100:.1f}%) — {c_status}\n"
-                resp += "\n💡 *Tip: Provide your **Gemini API Key** in the sidebar settings to unlock live generative dialogue and deep XAI explanations.*"
+                resp += "\nTo ask follow-up questions in plain language, add a Gemini API key under **Settings** in the sidebar."
             else:
-                resp += "The application is currently running with the **Local Zero-Leakage ML Engines** (Random Forest, LightGBM, XGBoost).\n\n"
-                resp += "You can test cases using the quick buttons above or slash commands like `/random` and `/compare`.\n"
-                resp += "To enable live natural language reasoning, enter your **Gemini API Key** in the sidebar."
+                resp += "The Random Forest, LightGBM and XGBoost models still work without Gemini:\n"
+                resp += "1. Pick a suggestion under the message box, such as **Random case**, **Hard case** or **Model disagreement**\n"
+                resp += "2. Or type `/random`, `/hard` or `/compare`\n"
+                resp += "3. To describe an event in your own words, first add a Gemini API key under **Settings** in the sidebar."
 
         # Simulate streaming chunks
         for word in resp.split(" "):
