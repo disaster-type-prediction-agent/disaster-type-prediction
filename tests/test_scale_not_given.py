@@ -139,3 +139,39 @@ def test_live_app_conversation_now_gives_japan_and_averages(tools):
     assert case["event"]["country"] == "Japan" and case["scale_not_given"]
     assert "nothing_measured was ignored" in result["note"]
     assert audit["models"]["Random Forest"]["prediction"]["predicted_class"] == "Earthquake"
+
+
+def test_burmese_nothing_measured_is_read_but_dont_know_is_not():
+    from src.event_features import says_nothing_measured
+    for said in ["ဘာမှ တိုင်းတာထားတာ မရှိပါဘူး၊ တခြားအသေးစိတ်လည်း မသိပါဘူး။",  # the typed eval's reply
+                 "မတိုင်းတာခဲ့ပါဘူး", "တိုင်းတာမှု မရှိပါ", "တိုင်းတာထားခြင်း မရှိပါ"]:
+        assert says_nothing_measured(said), said
+    for not_said in ["မသိပါဘူး",  # I don't know
+                     "ကြာချိန်ကို မှတ်တမ်းမတင်ထားဘူး",  # the duration wasn't recorded
+                     "ဧရိယာကို တိုင်းတာထားပေမယ့် ကိန်းဂဏန်း မရှိပါဘူး",  # area measured, no figure
+                     "အပူချိန်တွေကို တိုင်းတာမှတ်တမ်းတင်ခဲ့ပါတယ်"]:  # temperatures were measured
+        assert not says_nothing_measured(not_said), not_said
+
+
+def test_burmese_nothing_measured_answer_gives_the_unknown_scale(tools):
+    session = SessionCases()
+    session.message = "ဂျပန်နိုင်ငံမှာ ဇူလိုင်လအတွင်းက ဖြစ်ပျက်ခဲ့တဲ့ အခြေအနေတစ်ခုပါ။"  # Japan, July (CASE-1245)
+    result, _, audit, _ = tools.execute("classify_event", {"country": "Japan", "start_month": 7,
+                                                           "start_month_quote": "ဇူလိုင်လ"}, ["Random Forest"], session)
+    assert result["status"] == "need_more_details"
+
+    session.message = "ဘာမှ တိုင်းတာထားတာ မရှိပါဘူး၊ တခြားအသေးစိတ်လည်း မသိပါဘူး။"
+    _, _, audit, _ = tools.execute("classify_event", {"country": "Japan", "start_month": 7, "nothing_measured": True,
+                                                      "nothing_measured_quote": "ဘာမှ တိုင်းတာထားတာ မရှိပါဘူး"},
+                                   ["Random Forest"], session)
+    assert audit["case"]["event"]["magnitude_scale"] == "Unknown" and not audit["case"]["scale_not_given"]
+
+    # "I don't know" in Burmese still averages over the likely scales.
+    session = SessionCases()
+    session.message = "ဂျပန်နိုင်ငံမှာ ဇူလိုင်လအတွင်းက ဖြစ်ပျက်ခဲ့တဲ့ အခြေအနေတစ်ခုပါ။"
+    tools.execute("classify_event", {"country": "Japan", "start_month": 7, "start_month_quote": "ဇူလိုင်လ"},
+                  ["Random Forest"], session)
+    session.message = "မသိပါဘူး"
+    _, _, audit, _ = tools.execute("classify_event", {"country": "Japan", "start_month": 7, "nothing_measured": True},
+                                   ["Random Forest"], session)
+    assert audit["case"]["scale_not_given"]

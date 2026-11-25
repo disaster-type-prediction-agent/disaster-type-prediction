@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from src.event_features import (MAGNITUDE_SCALES, REGIONS, case_attribute_values, make_event_case, mark_filled,
-                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, denies, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text, quoted, code_reads)
+                                missing_details, says_nothing_measured, scale_from_text, observed_scale, confirms, denies, SCALE_QUANTITY, mentions_month, confirm_question, country_from_text, duration_from_text, type_stated_in_text, quoted, code_reads, MYANMAR_SCRIPT)
 
 MODEL = "claude-opus-5-5"
 _UNIT_DAYS = {"minutes": 1 / 1440, "hours": 1 / 24, "days": 1, "weeks": 7, "months": 30}
@@ -426,7 +426,8 @@ class AuditorTools:
             # "Nothing was measured" turns into the Unknown scale, a strong answer. In a language the code can't read,
             # a quote can't show that meaning (Gemini quoted "家が少し壊れました", the house was slightly damaged), so
             # there it is not taken: the scale stays not given and is averaged over the likely ones.
-            said_nothing = says_nothing_measured(text) if readable else False
+            # Burmese is the exception: the code knows its words for "not measured" (says_nothing_measured).
+            said_nothing = says_nothing_measured(text) if (readable or MYANMAR_SCRIPT.search(text or "")) else False
             if nothing_measured and not said_nothing:
                 # The LLM read "I don't know" as "nothing measured" (seen in the app on "ไม่ทราบครับ"). That would
                 # feed the models the Unknown scale; not knowing is averaged over likely scales instead.

@@ -373,3 +373,22 @@ def test_gemini_failing_on_the_answer_says_to_send_it_again(app):
     assert "ส่งคำตอบเดิมอีกครั้ง" in last["content"] and "built-in summary" not in last["content"]
     assert last["sources"].startswith("Written by the app, not Gemini")
     assert at.session_state["session_cases"].asked_details_on  # still open: sending it again carries on
+
+
+def test_confirm_question_is_in_burmese_for_burmese_messages_and_names_no_type():
+    from src.event_features import _QUANTITY_MY, MYANMAR_SCRIPT, confirm_question, names_a_type
+    from src.llm_tasks import DISASTER_WORDS
+
+    message = "ရန်ကုန်မှာ နိုဝင်ဘာလက ဖြစ်ခဲ့တဲ့ ဖြစ်စဉ်"  # "an event in Yangon in November"
+    for scale in _QUANTITY_MY:
+        q = confirm_question(scale, "အိမ်တွေ လှုပ်သွားတယ်", ["how long it lasted"], message)
+        assert MYANMAR_SCRIPT.search(q) and "You described" not in q
+        assert "ဟုတ်ကဲ့ / မဟုတ်ပါ / မသေချာပါ" in q and "ဘယ်လောက်ကြာခဲ့သလဲ" in q
+        assert not names_a_type(q) and not any(w in q for w in DISASTER_WORDS), (scale, q)
+
+
+def test_confirm_question_stays_english_and_thai_for_their_messages():
+    from src.event_features import confirm_question
+
+    assert confirm_question("Kph", "strong winds", [], "strong winds in Manila").startswith("You described")
+    assert confirm_question("Kph", "ลมแรง", [], "ลมแรงที่มะนิลา").startswith("จากที่เล่าว่า")

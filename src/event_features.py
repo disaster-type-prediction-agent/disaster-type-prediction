@@ -193,12 +193,19 @@ _NOTHING_MEASURED = re.compile(
     r"|ไม่มี\S{0,20}ขนาด\S{0,10}ที่บันทึก")
 
 
+# Burmese: only negations of တိုင်းတာ (to measure), so "မသိ" (I don't know) and "no figure was recorded" never
+# match. In the Burmese typed eval every Landslide was misread without this: the code couldn't confirm the
+# user's "nothing was measured", so the decisive Unknown scale was averaged away.
+_NOTHING_MEASURED_MY = re.compile(r"မတိုင်းတာ|တိုင်းတာ(?:ထားခဲ့|ထား|ခဲ့)?(?:တာ|ခြင်း|မှု|ချက်)\s*(?:ဘာမှ\s*)?မရှိ")
+
+
 def says_nothing_measured(text: Optional[str]) -> bool:
-    """Whether the user's own words say nothing was measured ("ไม่มีการวัด", "nothing was recorded").
+    """Whether the user's own words say nothing was measured ("ไม่มีการวัด", "nothing was recorded", "မတိုင်းတာ").
 
     nothing_measured feeds the models the Unknown scale, which reads as Landslide or Epidemic. In the app,
     Gemini passed it for a bare "ไม่ทราบครับ" (I don't know), so it counts only when the words say so."""
-    return bool(_NOTHING_MEASURED.search((text or "").lower()))
+    t = (text or "").lower()
+    return bool(_NOTHING_MEASURED.search(t) or _NOTHING_MEASURED_MY.search(t))
 
 
 # What a person can SEE or FEEL of the quantity a scale measures, without a number or the name of the quantity:
@@ -241,6 +248,15 @@ _QUANTITY_TH = {"Moment Magnitude": "ขนาดของแรงสั่น�
 _OTHER_ASKS = {"where it happened (country)": ("เกิดที่ประเทศไหน", "which country it happened in"),
                "the month it started": ("เริ่มเดือนไหน", "which month it started"),
                "how long it lasted": ("นานเท่าไร", "how long it lasted")}
+# Burmese (Myanmar script). The code can't read Burmese, so every quantity a Burmese message names is confirmed
+# with this question: it must exist in Burmese and, like the Thai one, name only the quantity, never a type
+# ("ground shaking", not ငလျင် earthquake).
+_QUANTITY_MY = {"Moment Magnitude": "မြေပြင်လှုပ်ခါမှု အရွယ်အစား (ရစ်ချ်တာ/မက်ဂနီကျု စကေး)", "Kph": "လေတိုက်နှုန်း",
+                "°C": "အပူချိန်", "Km2": "ထိခိုက်ခံရသည့် ဧရိယာ အကျယ်အဝန်း", "Vaccinated": "ကာကွယ်ဆေးထိုးပေးခဲ့သူ အရေအတွက်"}
+_OTHER_ASKS_MY = {"where it happened (country)": "ဘယ်နိုင်ငံမှာ ဖြစ်ခဲ့သလဲ",
+                  "the month it started": "ဘယ်လမှာ စတင်ခဲ့သလဲ",
+                  "how long it lasted": "ဘယ်လောက်ကြာခဲ့သလဲ"}
+MYANMAR_SCRIPT = re.compile(r"[\u1000-\u109f]")
 
 
 def confirm_question(scale: str, words: str, missing: List[str], text: Optional[str]) -> str:
@@ -251,6 +267,13 @@ def confirm_question(scale: str, words: str, missing: List[str], text: Optional[
         if others:
             q += " และ" + " และ".join(th for th, _ in others) + "ครับ"
         return q + "\n\nถ้าไม่แน่ใจหรือไม่ทราบ ตอบได้เลยครับ ระบบจะเฉลี่ยจากสิ่งที่มักบันทึกในพื้นที่นั้นแทน"
+    if MYANMAR_SCRIPT.search(text or ""):
+        q = f"\"{words}\" လို့ ပြောခဲ့တဲ့အတွက် ဒီဖြစ်စဉ်မှာ တိုင်းတာခဲ့တာက {_QUANTITY_MY[scale]} လား။ (ဟုတ်ကဲ့ / မဟုတ်ပါ / မသေချာပါ)"
+        asks = [_OTHER_ASKS_MY[m] for m in missing if m in _OTHER_ASKS_MY]
+        if asks:
+            q += " ဒါ့အပြင် " + "၊ ".join(asks) + " ဆိုတာလည်း ပြောပြပေးပါ။"
+        return q + ("\n\nမသေချာရင် ဒါမှမဟုတ် မသိရင် အဲဒီလိုပဲ ပြောလို့ရပါတယ်။ စနစ်က အဲဒီဒေသမှာ "
+                    "များသောအားဖြင့် မှတ်တမ်းတင်လေ့ရှိတာတွေကို ပျမ်းမျှပြီး တွက်ပေးပါလိမ့်မယ်။")
     q = f"You described \"{words}\". Was the quantity measured for this event {SCALE_QUANTITY[scale]}? (yes / no / not sure)"
     if others:
         q += " Also, please tell me " + " and ".join(en for _, en in others) + "."
