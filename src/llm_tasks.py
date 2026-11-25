@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from src.agent import gemini_models, make_gemini_client
-from src.event_features import MAGNITUDE_SCALES, REGIONS, describe_event, scale_from_text
+from src.event_features import MAGNITUDE_SCALES, REGIONS, code_reads, describe_event, scale_from_text
 
 
 @lru_cache(maxsize=4)
@@ -138,7 +138,11 @@ class _Scenario(BaseModel):
 
 DISASTER_WORDS = ["drought", "earthquake", "epidemic", "heat wave", "heatwave", "cold wave", "flood",
                   "landslide", "storm", "typhoon", "hurricane", "cyclone", "wildfire", "bushfire", "fire",
-                  "ภัยแล้ง", "แผ่นดินไหว", "โรคระบาด", "คลื่นความร้อน", "น้ำท่วม", "อุทกภัย", "ดินถล่ม", "พายุ", "ไต้ฝุ่น", "ไฟป่า"]
+                  "ภัยแล้ง", "แผ่นดินไหว", "โรคระบาด", "คลื่นความร้อน", "น้ำท่วม", "อุทกภัย", "ดินถล่ม", "พายุ", "ไต้ฝุ่น", "ไฟป่า",
+                  # Burmese: drought, earthquake, epidemic, infectious disease, heat wave, cold wave, flood,
+                  # landslide, storm, cyclone, typhoon, fire, forest fire
+                  "မိုးခေါင်", "ငလျင်", "ကပ်ရောဂါ", "ကူးစက်ရောဂါ", "အပူလှိုင်း", "အအေးလှိုင်း", "ရေကြီး",
+                  "မြေပြို", "မုန်တိုင်း", "ဆိုင်ကလုန်း", "တိုင်ဖွန်း", "မီးလောင်", "တောမီး"]
 
 
 MEASURED_AS = {"Km2": "the affected area (km²)", "Kph": "the wind speed (km/h)",
@@ -160,6 +164,8 @@ def _carries_scale(event: Dict[str, Any], message: str) -> bool:
     """A case measured without a figure must name the quantity, or the reader can't recover the scale."""
     if event.get("magnitude_value") is not None or event.get("magnitude_scale") not in MEASURED_AS:
         return True
+    if not code_reads(message):
+        return True  # the code reads only Thai and English; in other languages the agent's quote rule applies
     return scale_from_text(message) == event["magnitude_scale"]
 
 

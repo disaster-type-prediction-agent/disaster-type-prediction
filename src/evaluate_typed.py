@@ -11,6 +11,7 @@ Resumable: results are appended to a JSONL file and finished cases are skipped o
 
     python -m src.evaluate_typed --per-class 10            # run (needs GEMINI_API_KEY)
     python -m src.evaluate_typed --summarize               # write the report from the results
+    python -m src.evaluate_typed --per-class 5 --languages Burmese --out-dir reports/typed_eval_burmese
 """
 import argparse
 import json
@@ -24,11 +25,14 @@ from pathlib import Path
 OUT_DIR = Path("reports/typed_eval")
 RESULTS = OUT_DIR / "results.jsonl"
 MODELS = ["Random Forest", "LightGBM", "XGBoost"]
-NO_MORE = {"Thai": "ไม่ทราบรายละเอียดอื่นแล้ว เท่าที่บอกไปคือทั้งหมด", "English": "I don't know any other details; that's all I have."}
+NO_MORE = {"Thai": "ไม่ทราบรายละเอียดอื่นแล้ว เท่าที่บอกไปคือทั้งหมด", "English": "I don't know any other details; that's all I have.",
+           "Burmese": "တခြားအသေးစိတ် မသိတော့ပါဘူး။ ပြောပြီးသလောက်ပဲ သိပါတယ်။"}
 # The record says nothing was measured (scale Unknown): a user who knows the event says so, rather than leaving
 # the agent to guess whether "that's all I have" means "nothing measured" or "I don't know".
 NOTHING_MEASURED = {"Thai": "ไม่มีการวัดค่าใด ๆ ไว้ และไม่ทราบรายละเอียดอื่นแล้ว",
-                    "English": "Nothing was measured for it, and I don't know any other details."}
+                    "English": "Nothing was measured for it, and I don't know any other details.",
+                    "Burmese": "ဘာမှ တိုင်းတာထားတာ မရှိပါဘူး၊ တခြားအသေးစိတ်လည်း မသိပါဘူး။"}
+LANGUAGES = ["Thai", "English"]  # cases take turns through these; --languages changes them
 
 
 def follow_up_reply(event, language):
@@ -58,14 +62,15 @@ def sample_cases(registry, per_class, seed):
     return picked
 
 
-def run_case(case, index, key, tools, registry, calls, messages=None):
+def run_case(case, index, key, tools, registry, calls, messages=None, languages=None):
     from src.answer_check import check_answer
     from src.agent import agent_turn_text
     from src.auditor_agent import GeminiAuditorAgent, SessionCases
     from src.event_features import compare_events, event_from_case
     from src.llm_tasks import write_scenario
 
-    language = "Thai" if index % 2 == 0 else "English"
+    languages = languages or LANGUAGES
+    language = languages[index % len(languages)]
     event = event_from_case(case)
     start = calls["n"]
     record = {
@@ -133,7 +138,7 @@ def drop_results(case_ids):
     RESULTS.write_text("".join(keep))
 
 
-def run(per_class, seed, pause, reuse=None):
+def run(per_class, seed, pause, reuse=None, languages=None):
     from src import agent
     from src.auditor_agent import AuditorTools
     from src.models.registry import ModelRegistry
@@ -163,7 +168,7 @@ def run(per_class, seed, pause, reuse=None):
         for attempt in range(3):
             quota_before = calls["quota"]
             try:
-                record = run_case(case, i, key, tools, registry, calls, messages)
+                record = run_case(case, i, key, tools, registry, calls, messages, languages)
             except Exception as e:  # keep going; the case is retried on the next run
                 record = {"case_id": case["case_id"], "error": repr(e)}
             failed = record.get("error") or record.get("typed") is None
@@ -191,8 +196,11 @@ def summarize():
     records = [json.loads(line) for line in RESULTS.open() if line.strip()]
     n = len(records)
     classes = sorted({r["true_type"] for r in records})
+    langs = Counter(r.get("language", "Thai") for r in records)
+    written = (f"all written in {next(iter(langs))}" if len(langs) == 1
+               else "written in " + ", ".join(f"{lang} ({k})" for lang, k in langs.most_common()))
     lines = [f"# Typed-path evaluation\n",
-             f"{n} held-out test cases, {n // max(len(classes), 1)} per class, half written in Thai and half in English. "
+             f"{n} held-out test cases, {n // max(len(classes), 1)} per class, {written}. "
              "Gemini wrote each case as a chat message without its disaster type; the Gemini agent read it back "
              "and called the ML models, exactly as in the app. The ML models make every prediction.\n"]
 
@@ -274,7 +282,16 @@ if __name__ == "__main__":
     ap.add_argument("--summarize", action="store_true")
     ap.add_argument("--reuse-messages", help="results.jsonl of an earlier run: send the same messages again")
     ap.add_argument("--redo", help="comma-separated case ids to drop from the results and run again")
+    ap.add_argument("--languages", default=",".join(LANGUAGES),
+                    help="comma-separated languages the cases take turns in, e.g. Burmese or Thai,English")
+    ap.add_argument("--out-dir", default=str(OUT_DIR), help="where results.jsonl and the report go")
     args = ap.parse_args()
+    OUT_DIR = Path(args.out_dir)
+    RESULTS = OUT_DIR / "results.jsonl"
+    languages = [x.strip() for x in args.languages.split(",") if x.strip()]
+    unknown = [x for x in languages if x not in NO_MORE]
+    if unknown:
+        sys.exit(f"No simulated follow-up reply for {', '.join(unknown)}; add it to NO_MORE and NOTHING_MEASURED.")
     if args.redo:
         drop_results({c.strip().upper() for c in args.redo.split(",") if c.strip()})
-    summarize() if args.summarize else run(args.per_class, args.seed, args.pause, args.reuse_messages)
+    summarize() if args.summarize else run(args.per_class, args.seed, args.pause, args.reuse_messages, languages)
